@@ -7,6 +7,7 @@ import scalanative.util.unreachable
 
 /** Our subtyping can be described by a following diagram:
  *
+ *  {{{
  *    value kind        ref kind         special kind
  *    |     \           |    \
  *    |     |           |      \
@@ -18,23 +19,22 @@ import scalanative.util.unreachable
  *    |     |       /
  *    |     |   /
  *    nothing
+ *  }}}
  *
- *  Primitive and aggregate types don't participate in
- *  subtyping and they have to be explicitly boxed to become
- *  compatible with a reference type.
+ *  Primitive and aggregate types don't participate in subtyping and they have
+ *  to be explicitly boxed to become compatible with a reference type.
  *
- *  Reference types form a simple lattice with java.lang.Object
- *  at the top and null type at the bottom. Subtyping between
- *  traits and classes is based on linearization of the all
- *  transitive parents, similarly to scalac.
+ *  Reference types form a simple lattice with java.lang.Object at the top and
+ *  null type at the bottom. Subtyping between traits and classes is based on
+ *  linearization of the all transitive parents, similarly to scalac.
  *
- *  Nothing is the common bottom type between reference and value
- *  types. It represents computations that may never complete
- *  normally (either loops forever or throws an exception).
+ *  Nothing is the common bottom type between reference and value types. It
+ *  represents computations that may never complete normally (either loops
+ *  forever or throws an exception).
  */
 object Sub {
 
-  def is(l: Type, r: Type)(implicit linked: linker.Result): Boolean =
+  def is(l: Type, r: Type)(implicit linked: linker.Result): Boolean = {
     (l, r) match {
       case (l, r) if l == r =>
         true
@@ -49,44 +49,67 @@ object Sub {
       case _ =>
         false
     }
+  }
 
-  def is(info: ScopeInfo, ty: Type.RefKind)(
-      implicit linked: linker.Result): Boolean =
+  def is(info: ScopeInfo, ty: Type.RefKind)(implicit
+      linked: linker.Result
+  ): Boolean = {
     ty match {
       case ScopeRef(other) =>
         info.is(other)
       case _ =>
         util.unreachable
     }
+  }
 
-  def lub(tys: Seq[Type])(implicit linked: linker.Result): Type =
+  def lub(tys: Seq[Type], bound: Option[Type])(implicit
+      linked: linker.Result
+  ): Type = {
     tys match {
       case Seq() =>
         unreachable
       case head +: tail =>
-        tail.foldLeft[Type](head)(lub)
+        tail.foldLeft[Type](head)(lub(_, _, bound))
     }
+  }
 
-  def lub(lty: Type, rty: Type)(implicit linked: linker.Result): Type =
+  def lub(lty: Type, rty: Type, bound: Option[Type])(implicit
+      linked: linker.Result
+  ): Type = {
     (lty, rty) match {
       case _ if lty == rty =>
         lty
-      case (lty @ (_: Type.RefKind | Type.Ptr), Type.Null) =>
-        lty
-      case (Type.Null, rty @ (_: Type.RefKind | Type.Ptr)) =>
-        rty
       case (ty, Type.Nothing) =>
         ty
       case (Type.Nothing, ty) =>
         ty
-      case (ScopeRef(linfo), ScopeRef(rinfo)) =>
-        Type.Ref(lub(linfo, rinfo).name)
+      case (Type.Ptr, Type.Null) =>
+        Type.Ptr
+      case (Type.Null, Type.Ptr) =>
+        Type.Ptr
+      case (refty: Type.RefKind, Type.Null) =>
+        Type.Ref(refty.className, refty.isExact, nullable = true)
+      case (Type.Null, refty: Type.RefKind) =>
+        Type.Ref(refty.className, refty.isExact, nullable = true)
+      case (lty: Type.RefKind, rty: Type.RefKind) =>
+        val ScopeRef(linfo) = lty
+        val ScopeRef(rinfo) = rty
+        val binfo = bound.flatMap(ScopeRef.unapply)
+        val lubinfo = lub(linfo, rinfo, binfo)
+        val exact =
+          lubinfo.name == rinfo.name && rty.isExact &&
+            lubinfo.name == linfo.name && lty.isExact
+        val nullable =
+          lty.isNullable || rty.isNullable
+        Type.Ref(lubinfo.name, exact, nullable)
       case _ =>
         util.unsupported(s"lub(${lty.show}, ${rty.show})")
     }
+  }
 
-  def lub(linfo: ScopeInfo, rinfo: ScopeInfo)(
-      implicit linked: linker.Result): ScopeInfo =
+  def lub(linfo: ScopeInfo, rinfo: ScopeInfo, boundInfo: Option[ScopeInfo])(
+      implicit linked: linker.Result
+  ): ScopeInfo = {
     if (linfo == rinfo) {
       linfo
     } else if (linfo.is(rinfo)) {
@@ -94,7 +117,17 @@ object Sub {
     } else if (rinfo.is(linfo)) {
       linfo
     } else {
-      val candidates = linearize(linfo).filter(i => rinfo.is(i))
+      // If bound is not a type of linfo or rinfo
+      // it should be ignored. Otherwise java.lang.Object
+      // would be returned, which may not be correct
+      val correctedBoundInfo = boundInfo.filterNot { bound =>
+        (!linfo.is(bound) || !rinfo.is(bound))
+      }
+
+      val candidates =
+        linfo.linearized.filter { i =>
+          rinfo.is(i) && correctedBoundInfo.forall(i.is)
+        }
 
       candidates match {
         case Seq() =>
@@ -102,6 +135,9 @@ object Sub {
         case Seq(cand) =>
           cand
         case _ =>
+          def inhabitants(info: ScopeInfo): Int =
+            info.implementors.size
+
           val min = candidates.map(inhabitants).min
 
           val minimums = candidates.collect {
@@ -114,37 +150,5 @@ object Sub {
           }
       }
     }
-
-  def inhabitants(info: ScopeInfo): Int =
-    info.implementors.size
-
-  def linearize(info: ScopeInfo)(
-      implicit linked: linker.Result): Seq[ScopeInfo] = {
-    val out = mutable.UnrolledBuffer.empty[ScopeInfo]
-
-    def loop(info: ScopeInfo): Unit = info match {
-      case info: Class =>
-        out += info
-        info.traits.reverse.foreach(loop)
-        info.parent.foreach(loop)
-      case info: Trait =>
-        out += info
-        info.traits.reverse.foreach(loop)
-    }
-
-    def overwrite(l: Seq[ScopeInfo]): Seq[ScopeInfo] = {
-      val indexes = mutable.Map.empty[ScopeInfo, Int]
-      l.zipWithIndex.foreach {
-        case (v, idx) =>
-          indexes(v) = idx
-      }
-      l.zipWithIndex.collect {
-        case (v, idx) if indexes(v) == idx =>
-          v
-      }
-    }
-
-    loop(info)
-    overwrite(out)
   }
 }

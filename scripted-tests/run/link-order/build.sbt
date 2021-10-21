@@ -1,15 +1,26 @@
 enablePlugins(ScalaNativePlugin)
 
-scalaVersion := "2.11.12"
+import scala.sys.process._
+import scala.scalanative.build.Platform.isWindows
 
-nativeLinkingOptions in Compile += s"-L${target.value.getAbsoluteFile}"
+scalaVersion := {
+  val scalaVersion = System.getProperty("scala.version")
+  if (scalaVersion == null)
+    throw new RuntimeException(
+      """|The system property 'scala.version' is not defined.
+         |Specify this property using the scriptedLaunchOpts -D.""".stripMargin
+    )
+  else scalaVersion
+}
 
-compile in Compile := {
-  val log            = streams.value.log
-  val cwd            = target.value
+Compile / nativeLinkingOptions += s"-L${target.value.getAbsoluteFile}"
+
+Compile / compile := {
+  val log = streams.value.log
+  val cwd = target.value
   val compileOptions = nativeCompileOptions.value
-  val cpaths         = (baseDirectory.value.getAbsoluteFile * "*.c").get
-  val clangPath      = nativeClang.value.toPath.toAbsolutePath.toString
+  val cpaths = (baseDirectory.value.getAbsoluteFile * "*.c").get
+  val clangPath = nativeClang.value.toPath.toAbsolutePath.toString
 
   cwd.mkdirs()
 
@@ -18,7 +29,12 @@ compile in Compile := {
 
   def run(command: Seq[String]): Int = {
     log.info("Running " + command.mkString(" "))
-    Process(command, cwd) ! log
+
+    // Use a Process() idiom that works with both sbt 0.13.n & 1.n.
+    val processLog =
+      ProcessLogger(line => log.info(line), line => log.error(line))
+
+    scala.sys.process.Process(command, cwd) ! processLog
   }
 
   val opaths = cpaths.map { cpath =>
@@ -32,11 +48,18 @@ compile in Compile := {
     opath
   }
 
-  val archivePath = cwd / "liblink-order-test.a"
-  val archive     = Seq("ar", "cr", abs(archivePath)) ++ opaths
+  val libName =
+    if (isWindows) "link-order-test.lib"
+    else "liblink-order-test.a"
+
+  val archivePath = cwd / libName
+  // Windows does not have ar binary, but llvm toolchain provides llvm-ar
+  // On MacOS llvm-ar might not be defined in path by default
+  val archiveBin = if (isWindows) "llvm-ar" else "ar"
+  val archive = Seq(archiveBin, "cr", abs(archivePath)) ++ opaths
   if (run(archive) != 0) {
     sys.error(s"Failed to create archive $archivePath")
   }
 
-  (compile in Compile).value
+  (Compile / compile).value
 }

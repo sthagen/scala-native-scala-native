@@ -1,10 +1,11 @@
 package java.io
-
-import scalanative.native._
-import scalanative.libc._, stdlib._, stdio._, string._
-import scalanative.nio.fs.UnixException
-import scalanative.posix.{fcntl, unistd}, unistd._
-import scalanative.runtime
+import scala.scalanative.libc.stdio._
+import scala.scalanative.meta.LinktimeInfo.isWindows
+import scala.scalanative.posix.unistd.lseek
+import scala.scalanative.unsigned._
+import scala.scalanative.windows.FileApi._
+import scala.scalanative.windows.FileApiExt._
+import java.nio.channels.{FileChannel, FileChannelImpl}
 
 class FileInputStream(fd: FileDescriptor, file: Option[File])
     extends InputStream {
@@ -13,15 +14,20 @@ class FileInputStream(fd: FileDescriptor, file: Option[File])
   def this(file: File) = this(FileDescriptor.openReadOnly(file), Some(file))
   def this(str: String) = this(new File(str))
 
-  override def available(): Int = {
-    val currentPosition = lseek(fd.fd, 0, SEEK_CUR)
-    val lastPosition    = lseek(fd.fd, 0, SEEK_END)
-    lseek(fd.fd, currentPosition, SEEK_SET)
-    (lastPosition - currentPosition).toInt
-  }
+  private val channel: FileChannelImpl =
+    new FileChannelImpl(
+      fd,
+      file,
+      deleteFileOnClose = false,
+      openForReading = true,
+      openForWriting = false
+    )
 
-  override def close(): Unit =
-    fcntl.close(fd.fd)
+  override def available(): Int = channel.available()
+
+  override def close(): Unit = {
+    channel.close()
+  }
 
   override protected def finalize(): Unit =
     close()
@@ -42,43 +48,25 @@ class FileInputStream(fd: FileDescriptor, file: Option[File])
     read(buffer, 0, buffer.length)
   }
 
-  override def read(buffer: Array[Byte], offset: Int, count: Int): Int = {
-    if (buffer == null) {
-      throw new NullPointerException
-    }
-    if (offset < 0 || count < 0 || count > buffer.length - offset) {
-      throw new IndexOutOfBoundsException
-    }
-    if (count == 0) {
-      return 0
-    }
-
-    // we use the runtime knowledge of the array layout to avoid
-    // intermediate buffer, and write straight into the array memory
-    val buf       = buffer.asInstanceOf[runtime.ByteArray].at(offset)
-    val readCount = unistd.read(fd.fd, buf, count)
-
-    if (readCount == 0) {
-      // end of file
-      -1
-    } else if (readCount < 0) {
-      // negative value (typically -1) indicates that read failed
-      throw UnixException(file.fold("")(_.toString), errno.errno)
-    } else {
-      // successfully read readCount bytes
-      readCount
-    }
-  }
+  override def read(buffer: Array[Byte], offset: Int, count: Int): Int =
+    channel.read(buffer, offset, count)
 
   override def skip(n: Long): Long =
     if (n < 0) {
       throw new IOException()
     } else {
       val bytesToSkip = Math.min(n, available())
-      lseek(fd.fd, bytesToSkip, SEEK_CUR)
+      if (isWindows) {
+        SetFilePointerEx(
+          fd.handle,
+          distanceToMove = bytesToSkip,
+          newFilePointer = null,
+          moveMethod = FILE_CURRENT
+        )
+      } else
+        lseek(fd.fd, bytesToSkip, SEEK_CUR)
       bytesToSkip
     }
 
-  @stub
-  def getChannel: java.nio.channels.FileChannel = ???
+  def getChannel: FileChannel = channel
 }

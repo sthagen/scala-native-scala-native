@@ -7,15 +7,13 @@ in rec {
     shellHook = ''
     alias cls=clear
     '';
-    CLANG_PATH = pkgs.clang + "/bin/clang";
-    CLANGPP_PATH = pkgs.clang + "/bin/clang++";
+    LLVM_BIN = pkgs.clang + "/bin";
     buildInputs = with pkgs; [
       stdenv
       sbt
       openjdk
       boehmgc
       libunwind
-      re2
       clang
       zlib
     ];

@@ -1,4 +1,5 @@
 scalalib/src/
+scala-partest/fetchedSources/
 target/
 _build/
 *.dot
@@ -8,6 +9,7 @@ _build/
 scripts/.coursier
 scripts/.scalafmt*
 sbt-crossproject/
+local.sbt
 
 CMakeLists.txt
 cmake-build-debug/
@@ -19,3 +21,17 @@ bin/
 .settings/
 .externalToolBuilders/
 .cache*
+
+# metals
+/.bloop/
+/.metals/
+/project/**/metals.sbt
+
+# Build Server Protocol, used by sbt
+/.bsp/
+
+# vscode
+/.vscode/
+
+# vim
+*.swp

@@ -5,44 +5,45 @@ import nir.{Sig, Type, Global}
 
 class StubSpec extends LinkerSpec {
 
-  val entry            = "Main$"
+  val entry = "Main$"
   val stubMethodSource = """object Main {
                            |  def main(args: Array[String]): Unit =
                            |    stubMethod
-                           |  @scala.scalanative.native.stub
+                           |  @scala.scalanative.annotation.stub
                            |  def stubMethod: Int = ???
                            |}""".stripMargin
-  val stubClassSource  = """@scalanative.native.stub class StubClass
-                          |object Main {
-                          |  def main(args: Array[String]): Unit =
-                          |    new StubClass
-                          |}""".stripMargin
-  val stubModuleSource = """@scalanative.native.stub object StubModule
+  val stubClassSource = """@scalanative.annotation.stub class StubClass
+                           |object Main {
+                           |  def main(args: Array[String]): Unit =
+                           |    new StubClass
+                           |}""".stripMargin
+  val stubModuleSource = """@scalanative.annotation.stub object StubModule
                            |object Main {
                            |  def main(args: Array[String]): Unit =
                            |    StubModule
                            |}""".stripMargin
 
   "Stub methods" should "be ignored by the linker when `linkStubs = false`" in {
-    link(entry, stubMethodSource, linkStubs = false) { (cfg, result) =>
+    link(entry, stubMethodSource, _.withLinkStubs(false)) { (cfg, result) =>
       assert(!cfg.linkStubs)
       assert(result.unavailable.length == 1)
       assert(
         result.unavailable.head == Global
           .Top("Main$")
-          .member(Sig.Method("stubMethod", Seq(Type.Int))))
+          .member(Sig.Method("stubMethod", Seq(Type.Int)))
+      )
     }
   }
 
   it should "be included when `linkStubs = true`" in {
-    link(entry, stubMethodSource, linkStubs = true) { (cfg, result) =>
+    link(entry, stubMethodSource, _.withLinkStubs(true)) { (cfg, result) =>
       assert(cfg.linkStubs)
       assert(result.unavailable.isEmpty)
     }
   }
 
   "Stub classes" should "be ignored by the linker when `linkStubs = false`" in {
-    link(entry, stubClassSource, linkStubs = false) { (cfg, result) =>
+    link(entry, stubClassSource, _.withLinkStubs(false)) { (cfg, result) =>
       assert(!cfg.linkStubs)
       assert(result.unavailable.length == 1)
       assert(result.unavailable.head == Global.Top("StubClass"))
@@ -50,14 +51,14 @@ class StubSpec extends LinkerSpec {
   }
 
   it should "be included when `linkStubs = true`" in {
-    link(entry, stubClassSource, linkStubs = true) { (cfg, result) =>
+    link(entry, stubClassSource, _.withLinkStubs(true)) { (cfg, result) =>
       assert(cfg.linkStubs)
       assert(result.unavailable.isEmpty)
     }
   }
 
   "Stub modules" should "be ignored by the linker when `linkStubs = false`" in {
-    link(entry, stubModuleSource, linkStubs = false) { (cfg, result) =>
+    link(entry, stubModuleSource, _.withLinkStubs(false)) { (cfg, result) =>
       assert(!cfg.linkStubs)
       assert(result.unavailable.length == 1)
       assert(result.unavailable.head == Global.Top("StubModule$"))
@@ -65,7 +66,7 @@ class StubSpec extends LinkerSpec {
   }
 
   it should "be included when `linkStubs = true`" in {
-    link(entry, stubModuleSource, linkStubs = true) { (cfg, result) =>
+    link(entry, stubModuleSource, _.withLinkStubs(true)) { (cfg, result) =>
       assert(cfg.linkStubs)
       assert(result.unavailable.isEmpty)
     }

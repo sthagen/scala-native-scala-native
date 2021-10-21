@@ -1,44 +1,51 @@
 package scala.scalanative
 package nir
 
-import scala.util.matching.Regex
-
-import util.{unreachable, ShowBuilder}
+import java.nio.charset.StandardCharsets
+import scala.collection.mutable
+import scala.scalanative.util.ShowBuilder.InMemoryShowBuilder
+import scalanative.util.{ShowBuilder, unreachable}
 
 object Show {
-  def newBuilder: NirShowBuilder = new NirShowBuilder(new ShowBuilder)
+  def newBuilder: NirShowBuilder = new NirShowBuilder(new InMemoryShowBuilder)
   def debug[T](msg: String)(f: => T): T = {
     val value = f
     println("$msg: " + value)
     value
   }
 
-  def apply(v: Attr): String  = { val b = newBuilder; b.attr_(v); b.toString }
+  def apply(v: Attr): String = { val b = newBuilder; b.attr_(v); b.toString }
   def apply(v: Attrs): String = { val b = newBuilder; b.attrs_(v); b.toString }
-  def apply(v: Bin): String   = { val b = newBuilder; b.bin_(v); b.toString }
-  def apply(v: Comp): String  = { val b = newBuilder; b.comp_(v); b.toString }
-  def apply(v: Conv): String  = { val b = newBuilder; b.conv_(v); b.toString }
-  def apply(v: Defn): String  = { val b = newBuilder; b.defn_(v); b.toString }
+  def apply(v: Bin): String = { val b = newBuilder; b.bin_(v); b.toString }
+  def apply(v: Comp): String = { val b = newBuilder; b.comp_(v); b.toString }
+  def apply(v: Conv): String = { val b = newBuilder; b.conv_(v); b.toString }
+  def apply(v: Defn): String = { val b = newBuilder; b.defn_(v); b.toString }
   def apply(v: Global): String = {
     val b = newBuilder; b.global_(v); b.toString
   }
   def apply(v: Sig): String = {
     val b = newBuilder; b.sig_(v); b.toString
   }
-  def apply(v: Inst): String  = { val b = newBuilder; b.inst_(v); b.toString }
+  def apply(v: Inst): String = { val b = newBuilder; b.inst_(v); b.toString }
   def apply(v: Local): String = { val b = newBuilder; b.local_(v); b.toString }
-  def apply(v: Next): String  = { val b = newBuilder; b.next_(v); b.toString }
-  def apply(v: Op): String    = { val b = newBuilder; b.op_(v); b.toString }
-  def apply(v: Type): String  = { val b = newBuilder; b.type_(v); b.toString }
-  def apply(v: Val): String   = { val b = newBuilder; b.val_(v); b.toString }
+  def apply(v: Next): String = { val b = newBuilder; b.next_(v); b.toString }
+  def apply(v: Op): String = { val b = newBuilder; b.op_(v); b.toString }
+  def apply(v: Type): String = { val b = newBuilder; b.type_(v); b.toString }
+  def apply(v: Val): String = { val b = newBuilder; b.val_(v); b.toString }
+
+  type DefnString = (Global, String)
 
   def dump(defns: Seq[Defn], fileName: String): Unit = {
     val pw = new java.io.PrintWriter(fileName)
+
     try {
-      defns.foreach { defn =>
-        pw.write(defn.show)
-        pw.write("\n")
-      }
+      defns
+        .filter(_ != null)
+        .sortBy(_.name)
+        .foreach { defn =>
+          pw.write(defn.show)
+          pw.write("\n")
+        }
     } finally {
       pw.close()
     }
@@ -68,6 +75,20 @@ object Show {
         str("noinline")
       case Attr.AlwaysInline =>
         str("alwaysinline")
+      case Attr.MaySpecialize =>
+        str("mayspecialize")
+      case Attr.NoSpecialize =>
+        str("nospecialize")
+      case Attr.UnOpt =>
+        str("unopt")
+      case Attr.NoOpt =>
+        str("noopt")
+      case Attr.DidOpt =>
+        str("didopt")
+      case Attr.BailOpt(msg) =>
+        str("bailopt(\"")
+        str(escapeQuotes(msg))
+        str("\")")
       case Attr.Dyn =>
         str("dyn")
       case Attr.Stub =>
@@ -75,9 +96,9 @@ object Show {
       case Attr.Extern =>
         str("extern")
       case Attr.Link(name) =>
-        str("link(")
-        str(name)
-        str(")")
+        str("link(\"")
+        str(escapeQuotes(name))
+        str("\")")
       case Attr.Abstract =>
         str("abstract")
     }
@@ -100,6 +121,7 @@ object Show {
         str("(")
         rep(args, sep = ", ")(val_)
         str(")")
+      case Next.None => ()
     }
 
     def inst_(inst: Inst): Unit = inst match {
@@ -163,6 +185,7 @@ object Show {
           str(" ")
           next_(unwind)
         }
+      case _ => util.unsupported(s"Show does not support ${inst}")
     }
 
     def op_(op: Op): Unit = op match {
@@ -430,9 +453,11 @@ object Show {
         str(" {")
         rep(values, sep = ", ")(val_)
         str("}")
-      case Val.Chars(v) =>
+      case v: Val.Chars =>
         str("c\"")
-        str(escapeNewLine(escapeQuotes(v)))
+        val stringValue =
+          new java.lang.String(v.bytes, StandardCharsets.ISO_8859_1)
+        str(escapeNewLine(escapeQuotes(stringValue)))
         str("\"")
       case Val.Local(name, ty) =>
         local_(name)
@@ -454,6 +479,10 @@ object Show {
       case Val.Virtual(key) =>
         str("virtual ")
         str(key)
+      case Val.ClassOf(cls) =>
+        str("classOf[")
+        global_(cls)
+        str("]")
     }
 
     def defns_(defns: Seq[Defn]): Unit =
@@ -566,13 +595,19 @@ object Show {
       case Type.Var(ty) => str("var["); type_(ty); str("]")
       case Type.Unit    => str("unit")
       case Type.Array(ty, nullable) =>
-        if (!nullable) { str("?") }
+        if (!nullable) {
+          str("?")
+        }
         str("array[")
         type_(ty)
         str("]")
       case Type.Ref(name, exact, nullable) =>
-        if (exact) { str("!") }
-        if (!nullable) { str("?") }
+        if (exact) {
+          str("!")
+        }
+        if (!nullable) {
+          str("?")
+        }
         global_(name)
     }
 
@@ -594,16 +629,33 @@ object Show {
     }
 
     private def escapeNewLine(s: String): String =
-      """([^\\]|^)\n""".r.replaceAllIn(s, _.matched.toSeq match {
-        case Seq(sngl)     => s"""\\\\n"""
-        case Seq(fst, snd) => s"""${fst}\\\\n"""
-      })
+      """([^\\]|^)\n""".r.replaceAllIn(
+        s,
+        _.matched.toSeq match {
+          case Seq(sngl)     => s"""\\\\n"""
+          case Seq(fst, snd) => s"""${fst}\\\\n"""
+        }
+      )
 
-    private def escapeQuotes(s: String): String =
-      """([^\\]|^)"""".r.replaceAllIn(s, _.matched.toSeq match {
-        case Seq(sngl)     => s"\\\\$sngl"
-        case Seq(fst, snd) => s"$fst\\\\$snd"
-      })
+    private def escapeQuotes(s: String): String = {
+      val chars = s.toArray
+      val out = mutable.UnrolledBuffer.empty[Char]
+      var i = 0
+      var escaped = false
+      while (i < chars.length) {
+        val char = chars(i)
+        char match {
+          case '"' =>
+            if (!escaped) out += '\\'
+            out += char
+          case _ =>
+            out += char
+        }
+        escaped = char == '\\'
+        i += 1
+      }
+      new String(out.toArray)
+    }
 
     override def toString: String = builder.toString
   }

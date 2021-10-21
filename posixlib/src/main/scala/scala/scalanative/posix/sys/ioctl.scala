@@ -1,6 +1,6 @@
 package scala.scalanative.posix.sys
 
-import scalanative.native._
+import scalanative.unsafe._
 
 @extern
 object ioctl {
@@ -8,6 +8,6 @@ object ioctl {
   @name("scalanative_ioctl")
   def ioctl(fd: CInt, request: CLongInt, argp: Ptr[Byte]): CInt = extern
 
-  @name("scalanative_FIONREAD")
+  @name("scalanative_fionread")
   def FIONREAD: CLongInt = extern
 }

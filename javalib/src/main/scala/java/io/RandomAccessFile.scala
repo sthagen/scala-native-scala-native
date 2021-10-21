@@ -1,54 +1,68 @@
 package java.io
 
-import scalanative.native.{toCString, Zone}
-import scalanative.libc.stdio
-import scalanative.posix.{fcntl, unistd}
+import java.{lang => jl}
+import scalanative.unsafe.{Zone, toCString, toCWideStringUTF16LE}
+import scalanative.posix.fcntl
 import scalanative.posix.sys.stat
+import scalanative.meta.LinktimeInfo.isWindows
+import scala.scalanative.windows
+import windows._
+import windows.FileApiExt._
+import java.nio.channels.{FileChannelImpl, FileChannel}
 
-class RandomAccessFile private (file: File,
-                                fd: FileDescriptor,
-                                flush: Boolean,
-                                mode: String)
-    extends DataOutput
+class RandomAccessFile private (
+    file: File,
+    fd: FileDescriptor,
+    flush: Boolean,
+    mode: String
+) extends DataOutput
     with DataInput
     with Closeable {
   def this(file: File, mode: String) =
-    this(file,
-         RandomAccessFile.fileDescriptor(file, mode),
-         RandomAccessFile.flush(mode),
-         mode)
+    this(
+      file,
+      RandomAccessFile.fileDescriptor(file, mode),
+      RandomAccessFile.flush(mode),
+      mode
+    )
   def this(name: String, mode: String) = this(new File(name), mode)
 
-  private var closed: Boolean = false
-  private lazy val in         = new DataInputStream(new FileInputStream(fd))
-  private lazy val out        = new DataOutputStream(new FileOutputStream(fd))
+  private lazy val in = new DataInputStream(new FileInputStream(fd))
+  private lazy val out = new DataOutputStream(new FileOutputStream(fd))
+  private lazy val channel =
+    new FileChannelImpl(
+      fd,
+      Some(file),
+      deleteFileOnClose = false,
+      openForReading = true,
+      openForWriting = mode.contains('w')
+    )
 
-  override def close(): Unit = {
-    closed = true
-    fcntl.close(fd.fd)
-  }
+  override def close(): Unit =
+    channel.close()
 
-  // final def getChannel(): FileChannel
+  final def getChannel(): FileChannel =
+    channel
 
   def getFD(): FileDescriptor =
     fd
 
   def getFilePointer(): Long =
-    unistd.lseek(fd.fd, 0, stdio.SEEK_CUR).toLong
+    channel.position()
 
   def length(): Long =
     file.length()
 
   def read(): Int =
-    if (closed) throw new IOException("Stream Closed")
+    if (!channel.isOpen()) throw new IOException("Stream Closed")
     else in.read()
 
   def read(b: Array[Byte]): Int =
-    if (closed) throw new IOException("Stream Closed")
+    if (!channel.isOpen()) throw new IOException("Stream Closed")
     else in.read(b)
 
   def read(b: Array[Byte], off: Int, len: Int): Int =
-    if (closed) throw new IOException("Stream Closed")
+    if (!channel.isOpen()) throw new IOException("Stream Closed")
     else in.read(b, off, len)
 
   override final def readBoolean(): Boolean =
@@ -76,20 +90,39 @@ class RandomAccessFile private (file: File,
     in.readInt()
 
   override final def readLine(): String = {
-    if (getFilePointer == length) null
-    else {
-      val builder = new StringBuilder
-      var c       = '0'
-      do {
-        c = readChar()
-        builder.append(c)
-      } while (c != '\n' && c != '\r')
+    // DataInputStream#readLine has been deprecated since JDK 1.1
+    // so implement RAF#readLine, rather than delegating.
+    var pos = getFilePointer()
+    var end = length() // standard practice: 1 past last valid byte.
+    if (pos >= end) {
+      null // JDK 8 specification requires null here.
+    } else {
+      val builder = new jl.StringBuilder
+      var done = false
 
-      // If there's a newline after carriage-return, we must eat it too.
-      if (c == '\r' && readChar() != '\n') {
-        seek(getFilePointer - 1)
+      while (!done && (pos < end)) {
+        val c = readByte().toChar
+        pos += 1
+
+        c match {
+          case '\n' => done = true
+
+          case '\r' =>
+            // If there's a newline after carriage-return, we must eat it too.
+            if (pos < end) {
+              if (readByte().toChar == '\n') {
+                pos += 1
+              } else {
+                seek(getFilePointer() - 1)
+              }
+            }
+            done = true
+
+          case _ => builder.append(c)
+        }
       }
-      builder.toString.init
+
+      builder.toString
     }
   }
 
@@ -109,24 +142,16 @@ class RandomAccessFile private (file: File,
     in.readUTF()
 
   def seek(pos: Long): Unit =
-    unistd.lseek(fd.fd, pos, stdio.SEEK_SET)
+    channel.position(pos)
 
   def setLength(newLength: Long): Unit =
-    if (!mode.contains("w")) {
-      throw new IOException("Invalid argument")
-    } else {
-      val currentPosition = getFilePointer()
-      if (unistd.ftruncate(fd.fd, newLength) != 0) {
-        throw new IOException()
-      }
-      if (currentPosition > newLength) seek(newLength)
-    }
+    channel.truncate(newLength)
 
   override def skipBytes(n: Int): Int =
     if (n <= 0) 0
     else {
-      val currentPosition = getFilePointer
-      val fileLength      = length()
+      val currentPosition = getFilePointer()
+      val fileLength = length()
       val toSkip =
         if (currentPosition + n > fileLength) fileLength - currentPosition
         else n
@@ -201,7 +226,7 @@ class RandomAccessFile private (file: File,
 
   override final def writeUTF(str: String): Unit = {
     out.writeUTF(str)
-    maybeFlush
+    maybeFlush()
   }
 
   private def maybeFlush(): Unit =
@@ -209,23 +234,56 @@ class RandomAccessFile private (file: File,
 }
 
 private object RandomAccessFile {
-  private def fileDescriptor(file: File, _flags: String) =
-    Zone { implicit z =>
+  private def fileDescriptor(file: File, _flags: String) = {
+    if (_flags == "r" && !file.exists())
+      throw new FileNotFoundException(file.getName())
+
+    def invalidFlags() =
+      throw new IllegalArgumentException(
+        s"""Illegal mode "${_flags}" must be one of "r", "rw", "rws" or "rwd""""
+      )
+
+    def unixFileDescriptor() = Zone { implicit z =>
       import fcntl._
       import stat._
-      if (_flags == "r" && !file.exists)
-        throw new FileNotFoundException(file.getName)
+
       val flags = _flags match {
         case "r"                  => O_RDONLY
         case "rw" | "rws" | "rwd" => O_RDWR | O_CREAT
-        case _ =>
-          throw new IllegalArgumentException(
-            s"""Illegal mode "${_flags}" must be one of "r", "rw", "rws" or "rwd"""")
+        case _                    => invalidFlags()
       }
       val mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH
-      val fd   = open(toCString(file.getPath), flags, mode)
-      new FileDescriptor(fd)
+      val fd = open(toCString(file.getPath()), flags, mode)
+      new FileDescriptor(FileDescriptor.FileHandle(fd), readOnly = false)
     }
+
+    def windowsFileDescriptor() = Zone { implicit z =>
+      import windows.winnt.AccessRights._
+      val (access, dispostion) = _flags match {
+        case "r" => FILE_GENERIC_READ -> OPEN_EXISTING
+        case "rw" | "rws" | "rwd" =>
+          (FILE_GENERIC_READ | FILE_GENERIC_WRITE).toUInt -> OPEN_ALWAYS
+        case _ => invalidFlags()
+      }
+
+      val handle = FileApi.CreateFileW(
+        toCWideStringUTF16LE(file.getPath()),
+        desiredAccess = access,
+        shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE,
+        securityAttributes = null,
+        creationDisposition = dispostion,
+        flagsAndAttributes = FILE_ATTRIBUTE_NORMAL,
+        templateFile = null
+      )
+      new FileDescriptor(
+        FileDescriptor.FileHandle(handle),
+        readOnly = _flags == "r"
+      )
+    }
+
+    if (isWindows) windowsFileDescriptor()
+    else unixFileDescriptor()
+  }
 
   private def flush(mode: String): Boolean =
     mode match {

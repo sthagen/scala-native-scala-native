@@ -1,12 +1,13 @@
 package java.lang
 
-import scalanative.native.stub
-import scalanative.libc.errno
+import scalanative.annotation.stub
+import scalanative.meta.LinktimeInfo.isWindows
+import java.lang.impl._
 
 class Thread private (runnable: Runnable) extends Runnable {
   if (runnable ne Thread.MainRunnable) ???
 
-  private var interruptedState   = false
+  private var interruptedState = false
   private[this] var name: String = "main" // default name of the main thread
 
   def run(): Unit = ()
@@ -23,8 +24,9 @@ class Thread private (runnable: Runnable) extends Runnable {
   final def getName(): String =
     this.name
 
-  @stub
-  def getStackTrace(): Array[StackTraceElement] = ???
+  // Stub implementation
+  def getStackTrace(): Array[StackTraceElement] =
+    new Array[StackTraceElement](0) // Do not use scala collections.
 
   def getId(): scala.Long = 1
 
@@ -42,6 +44,15 @@ class Thread private (runnable: Runnable) extends Runnable {
   def this(name: String) = this(??? : Runnable)
 
   @stub
+  def this() = this(??? : Runnable)
+
+  @stub
+  def join(): Unit = ???
+
+  @stub
+  def start(): Unit = ???
+
+  @stub
   def getContextClassLoader(): java.lang.ClassLoader = ???
 
   trait UncaughtExceptionHandler {
@@ -51,26 +62,17 @@ class Thread private (runnable: Runnable) extends Runnable {
 
 object Thread {
   private val MainRunnable = new Runnable { def run(): Unit = () }
-  private val MainThread   = new Thread(MainRunnable)
+  private val MainThread = new Thread(MainRunnable)
 
   def currentThread(): Thread = MainThread
 
   def interrupted(): scala.Boolean = {
-    val ret = currentThread.isInterrupted
-    currentThread.interruptedState = false
+    val ret = currentThread().isInterrupted()
+    currentThread().interruptedState = false
     ret
   }
 
   def sleep(millis: scala.Long, nanos: scala.Int): Unit = {
-    import scala.scalanative.posix.errno.EINTR
-    import scala.scalanative.native._
-    import scala.scalanative.posix.unistd
-
-    def checkErrno() =
-      if (errno.errno == EINTR) {
-        throw new InterruptedException("Sleep was interrupted")
-      }
-
     if (millis < 0) {
       throw new IllegalArgumentException("millis must be >= 0")
     }
@@ -78,10 +80,8 @@ object Thread {
       throw new IllegalArgumentException("nanos value out of range")
     }
 
-    val secs  = millis / 1000
-    val usecs = (millis % 1000) * 1000 + nanos / 1000
-    if (secs > 0 && unistd.sleep(secs.toUInt) != 0.toUInt) checkErrno()
-    if (usecs > 0 && unistd.usleep(usecs.toUInt) != 0) checkErrno()
+    if (isWindows) WindowsThread.sleep(millis, nanos)
+    else PosixThread.sleep(millis, nanos)
   }
 
   def sleep(millis: scala.Long): Unit = sleep(millis, 0)

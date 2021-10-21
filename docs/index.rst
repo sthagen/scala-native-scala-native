@@ -2,6 +2,8 @@
 Scala Native
 ============
 
+Version |release| 
+
 Scala Native is an optimizing ahead-of-time compiler and lightweight managed
 runtime designed specifically for Scala. It features:
 
@@ -12,9 +14,9 @@ runtime designed specifically for Scala. It features:
       type Vec = CStruct3[Double, Double, Double]
 
       val vec = stackalloc[Vec] // allocate c struct on stack
-      !vec._1 = 10.0            // initialize fields
-      !vec._2 = 20.0
-      !vec._3 = 30.0
+      vec._1 = 10.0             // initialize fields
+      vec._2 = 20.0
+      vec._3 = 30.0
       length(vec)               // pass by reference
 
   Pointers, structs, you name it. Low-level primitives
@@ -62,7 +64,7 @@ Community
   Join `our Gitter chat channel <https://gitter.im/scala-native/scala-native>`_.
 
 * Have a question?
-  Ask it on `Stack Overflow with tag scala-native <http://stackoverflow.com/questions/tagged/scala-native>`_.
+  Ask it on `Stack Overflow with tag scala-native <https://stackoverflow.com/questions/tagged/scala-native>`_.
 
 * Found a bug or want to propose a new feature?
   Open `an issue on Github <https://github.com/scala-native/scala-native/issues>`_.
@@ -84,5 +86,5 @@ and the development process behind the project.
   lib/index
   contrib/index
   blog/index
-  changelog
+  changelog/index
   faq

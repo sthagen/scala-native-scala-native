@@ -6,26 +6,35 @@ trait Log { self: Interflow =>
     false
 
   def in[T](msg: String)(f: => T): T = {
-    if (show) { log(msg) }
-    context ::= msg
+    log(msg)
+    pushContext(msg)
     try {
-      val start = System.nanoTime
-      val res   = f
-      val end   = System.nanoTime
-      if (show) { log(s"done $msg (${(end - start) / 1000000D})") }
-      res
+      if (show) {
+        val start = System.nanoTime
+        val res = f
+        val end = System.nanoTime
+        log(s"done $msg (${(end - start) / 1000000d})")
+        res
+      } else f
     } catch {
       case e: Throwable =>
-        log("unwinding " + msg)
+        log("unwinding " + msg + " due to: " + e.toString)
         throw e
     } finally {
-      context = context.tail
+      popContext()
     }
   }
 
-  def log(msg: String): Unit =
+  def log(msg: => String): Unit =
     if (show) {
-      println("  " * context.size + msg)
+      println(("  " * contextDepth()) + msg)
+    }
+
+  /* Performance Note: Useful to wrap large functions that are used only for
+   * logging, as the code is not executed when show is false. */
+  def withLogger(f: (String => Unit) => Unit): Unit =
+    if (show) {
+      f(x => log(x))
     }
 
   def debug[T](msg: String)(f: => T): T = {

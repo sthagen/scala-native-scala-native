@@ -3,22 +3,29 @@ package codegen
 
 import scala.collection.mutable
 import scalanative.nir._
-import scalanative.sema._
 import scalanative.linker.{Trait, Class}
 
 class Metadata(val linked: linker.Result, proxies: Seq[Defn]) {
-  val rtti   = mutable.Map.empty[linker.Info, RuntimeTypeInformation]
+  val rtti = mutable.Map.empty[linker.Info, RuntimeTypeInformation]
   val vtable = mutable.Map.empty[linker.Class, VirtualTable]
   val layout = mutable.Map.empty[linker.Class, FieldLayout]
   val dynmap = mutable.Map.empty[linker.Class, DynamicHashMap]
-  val ids    = mutable.Map.empty[linker.ScopeInfo, Int]
+  val ids = mutable.Map.empty[linker.ScopeInfo, Int]
   val ranges = mutable.Map.empty[linker.Class, Range]
 
-  val classes        = initClassIdsAndRanges()
-  val traits         = initTraitIds()
-  val moduleArray    = new ModuleArray(this)
-  val dispatchTable  = new TraitDispatchTable(this)
+  val classes = initClassIdsAndRanges()
+  val traits = initTraitIds()
+  val moduleArray = new ModuleArray(this)
+  val dispatchTable = new TraitDispatchTable(this)
   val hasTraitTables = new HasTraitTables(this)
+
+  val Rtti = Type.StructValue(Seq(Type.Ptr, Type.Int, Type.Int, Type.Ptr))
+  val RttiClassIdIndex = Seq(Val.Int(0), Val.Int(1))
+  val RttiTraitIdIndex = Seq(Val.Int(0), Val.Int(2))
+  val RttiVtableIndex =
+    Seq(Val.Int(0), Val.Int(if (linked.dynsigs.isEmpty) 4 else 5))
+  val RttiDynmapIndex =
+    Seq(Val.Int(0), Val.Int(if (linked.dynsigs.isEmpty) -1 else 4))
 
   initClassMetadata()
   initTraitMetadata()
@@ -27,7 +34,7 @@ class Metadata(val linked: linker.Result, proxies: Seq[Defn]) {
     val traits =
       linked.infos.valuesIterator
         .collect { case info: Trait => info }
-        .toArray
+        .toIndexedSeq
         .sortBy(_.name.show)
     traits.zipWithIndex.foreach {
       case (node, id) =>
@@ -38,7 +45,7 @@ class Metadata(val linked: linker.Result, proxies: Seq[Defn]) {
 
   def initClassIdsAndRanges(): Seq[Class] = {
     val out = mutable.UnrolledBuffer.empty[Class]
-    var id  = 0
+    var id = 0
 
     def loop(node: Class): Unit = {
       out += node
@@ -46,9 +53,7 @@ class Metadata(val linked: linker.Result, proxies: Seq[Defn]) {
       id += 1
       val directSubclasses =
         node.subclasses.filter(_.parent == Some(node)).toArray
-      directSubclasses.sortBy(_.name.show).foreach { subcls =>
-        loop(subcls)
-      }
+      directSubclasses.sortBy(_.name.show).foreach { subcls => loop(subcls) }
       val end = id - 1
       ids(node) = start
       ranges(node) = start to end
@@ -56,14 +61,16 @@ class Metadata(val linked: linker.Result, proxies: Seq[Defn]) {
 
     loop(linked.infos(Rt.Object.name).asInstanceOf[Class])
 
-    out
+    out.toSeq
   }
 
   def initClassMetadata(): Unit = {
     classes.foreach { node =>
       vtable(node) = new VirtualTable(this, node)
       layout(node) = new FieldLayout(this, node)
-      dynmap(node) = new DynamicHashMap(this, node, proxies)
+      if (linked.dynsigs.nonEmpty) {
+        dynmap(node) = new DynamicHashMap(this, node, proxies)
+      }
       rtti(node) = new RuntimeTypeInformation(this, node)
     }
   }

@@ -1,6 +1,6 @@
 package java.net
 
-import scalanative.native.stub
+import scalanative.annotation.stub
 
 class URL(from: String) {
   @stub
@@ -13,4 +13,8 @@ class URL(from: String) {
   def openStream(): java.io.InputStream = ???
   @stub
   override def hashCode: Int = ???
+  @stub
+  def toURI(): java.net.URI = ???
+  @stub
+  def toExternalForm(): java.lang.String = ???
 }

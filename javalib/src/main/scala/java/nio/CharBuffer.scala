@@ -13,33 +13,35 @@ object CharBuffer {
     wrap(array, 0, array.length)
 
   def wrap(csq: CharSequence, start: Int, end: Int): CharBuffer =
-    StringCharBuffer.wrap(csq, 0, csq.length, start, end - start)
+    StringCharBuffer.wrap(csq, 0, csq.length(), start, end - start)
 
   def wrap(csq: CharSequence): CharBuffer =
-    wrap(csq, 0, csq.length)
+    wrap(csq, 0, csq.length())
 }
 
-abstract class CharBuffer private[nio] (_capacity: Int,
-                                        private[nio] val _array: Array[Char],
-                                        private[nio] val _arrayOffset: Int)
-    extends Buffer(_capacity)
+abstract class CharBuffer private[nio] (
+    _capacity: Int,
+    private[nio] val _array: Array[Char],
+    private[nio] val _mappedData: MappedByteBufferData,
+    private[nio] val _arrayOffset: Int
+) extends Buffer(_capacity)
     with Comparable[CharBuffer]
     with CharSequence
     with Appendable
     with Readable {
 
   private[nio] type ElementType = Char
-  private[nio] type BufferType  = CharBuffer
+  private[nio] type BufferType = CharBuffer
 
-  def this(_capacity: Int) = this(_capacity, null, -1)
+  def this(_capacity: Int) = this(_capacity, null, null, -1)
 
   def read(target: CharBuffer): Int = {
     // Attention: this method must not change this buffer's position
-    val n = remaining
+    val n = remaining()
     if (n == 0) -1
     else if (_array != null) {
       // even if read-only
-      target.put(_array, _arrayOffset, n)
+      GenBuffer(target).generic_put(_array, _arrayOffset, n)
       n
     } else {
       val savedPos = position()
@@ -151,9 +153,9 @@ abstract class CharBuffer private[nio] (_capacity: Int,
   override def toString(): String = {
     if (_array != null) {
       // even if read-only
-      new String(_array, position() + _arrayOffset, remaining)
+      new String(_array, position() + _arrayOffset, remaining())
     } else {
-      val chars    = new Array[Char](remaining)
+      val chars = new Array[Char](remaining())
       val savedPos = position()
       get(chars)
       position(savedPos)
@@ -161,7 +163,7 @@ abstract class CharBuffer private[nio] (_capacity: Int,
     }
   }
 
-  final def length(): Int = remaining
+  final def length(): Int = remaining()
 
   final def charAt(index: Int): Char = get(position() + index)
 
@@ -185,16 +187,20 @@ abstract class CharBuffer private[nio] (_capacity: Int,
   private[nio] def store(index: Int, elem: Char): Unit
 
   @inline
-  private[nio] def load(startIndex: Int,
-                        dst: Array[Char],
-                        offset: Int,
-                        length: Int): Unit =
+  private[nio] def load(
+      startIndex: Int,
+      dst: Array[Char],
+      offset: Int,
+      length: Int
+  ): Unit =
     GenBuffer(this).generic_load(startIndex, dst, offset, length)
 
   @inline
-  private[nio] def store(startIndex: Int,
-                         src: Array[Char],
-                         offset: Int,
-                         length: Int): Unit =
+  private[nio] def store(
+      startIndex: Int,
+      src: Array[Char],
+      offset: Int,
+      length: Int
+  ): Unit =
     GenBuffer(this).generic_store(startIndex, src, offset, length)
 }

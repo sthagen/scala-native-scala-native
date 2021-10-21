@@ -1,11 +1,14 @@
 package java.util.zip
 
-import scala.scalanative.native._
+import scala.scalanative.unsigned._
+import scala.scalanative.unsafe._
 import scala.scalanative.libc._
 import scala.scalanative.runtime.{ByteArray, zlib}
+import scala.scalanative.runtime.zlibExt.z_stream
+import scala.scalanative.runtime.zlibOps._
+import zlib._
 
 // Ported from Apache Harmony
-
 class Deflater(private var compressLevel: Int, noHeader: Boolean) {
   def this(compressLevel: Int) = this(compressLevel, noHeader = false)
   def this() = this(Deflater.DEFAULT_COMPRESSION)
@@ -14,13 +17,13 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
     throw new IllegalArgumentException()
   }
 
-  private var flushParm                = Deflater.NO_FLUSH
-  private var isFinished               = false
-  private var strategy                 = Deflater.DEFAULT_STRATEGY
+  private var flushParm = Deflater.NO_FLUSH
+  private var isFinished = false
+  private var strategy = Deflater.DEFAULT_STRATEGY
   private var inputBuffer: Array[Byte] = null
-  private var stream: zlib.z_streamp =
+  private var stream: z_streamp =
     Deflater.createStream(compressLevel, strategy, noHeader)
-  private var inRead: Int   = 0
+  private var inRead: Int = 0
   private var inLength: Int = 0
 
   def deflate(buf: Array[Byte]): Int =
@@ -44,18 +47,20 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
     deflateImpl(buf, off, nbytes, flushParam)
   }
 
-  private def deflateImpl(buf: Array[Byte],
-                          off: Int,
-                          len: Int,
-                          flushParam: Int): Int = {
+  private def deflateImpl(
+      buf: Array[Byte],
+      off: Int,
+      len: Int,
+      flushParam: Int
+  ): Int = {
     val inBytes = inRead
-    !(stream._5) = len.toUInt
-    val sin  = (!(stream._3)).toInt
-    val sout = (!(stream._6)).toInt
+    stream.availableOut = len.toUInt
+    val sin = stream.totalIn.toInt
+    val sout = stream.totalOut.toInt
     if (buf.length == 0) {
-      !(stream._4) = Deflater.empty.asInstanceOf[ByteArray].at(off)
+      stream.nextOut = Deflater.empty.asInstanceOf[ByteArray].at(off)
     } else {
-      !(stream._4) = buf.asInstanceOf[ByteArray].at(off)
+      stream.nextOut = buf.asInstanceOf[ByteArray].at(off)
     }
     val err = zlib.deflate(stream, flushParm)
 
@@ -63,14 +68,14 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
       throw new OutOfMemoryError()
     } else if (err == zlib.Z_STREAM_END) {
       isFinished = true
-      val totalOut = (!(stream._6)).toInt
+      val totalOut = stream.totalOut.toInt
       totalOut - sout
     } else {
       if (flushParm != zlib.Z_FINISH) {
-        val totalIn = (!(stream._3)).toInt
+        val totalIn = stream.totalIn.toInt
         inRead = totalIn - sin + inBytes
       }
-      val totalOut = (!(stream._6)).toInt
+      val totalOut = stream.totalOut.toInt
       totalOut - sout
     }
   }
@@ -79,7 +84,7 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
     if (stream != null) {
       zlib.deflateEnd(stream)
       inputBuffer = null
-      stdlib.free(stream.cast[Ptr[Byte]])
+      stdlib.free(stream.asInstanceOf[Ptr[Byte]])
       stream = null
     }
   }
@@ -97,21 +102,21 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
     if (stream == null) {
       throw new IllegalStateException()
     } else {
-      (!(stream._12)).toInt
+      stream.adler.toInt
     }
 
   def getTotalIn(): Int =
     if (stream == null) {
       throw new IllegalStateException()
     } else {
-      (!(stream._3)).toInt
+      stream.totalIn.toInt
     }
 
   def getTotalOut(): Int =
     if (stream == null) {
       throw new IllegalStateException()
     } else {
-      (!(stream._6)).toInt
+      stream.totalOut.toInt
     }
 
   def needsInput(): Boolean =
@@ -135,7 +140,7 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
       throw new IllegalStateException()
     } else if (off <= buf.length && nbytes >= 0 && off >= 0 && buf.length - off >= nbytes) {
       val bytes = buf.asInstanceOf[ByteArray].at(off)
-      val err   = zlib.deflateSetDictionary(stream, bytes, nbytes.toUInt)
+      val err = zlib.deflateSetDictionary(stream, bytes, nbytes.toUInt)
       if (err != zlib.Z_OK) {
         throw new IllegalArgumentException(err.toString)
       }
@@ -153,7 +158,7 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
       inLength = nbytes
       inRead = 0
       if (inputBuffer == null) {
-        !(stream._4) = null
+        stream.nextOut = null
         val err = zlib.deflateParams(stream, compressLevel, strategy)
         if (err != zlib.Z_OK) {
           throw new IllegalStateException(err.toString)
@@ -161,11 +166,11 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
       }
       inputBuffer = buf
       if (buf.length == 0) {
-        !(stream._1) = Deflater.empty.asInstanceOf[ByteArray].at(off)
+        stream.nextIn = Deflater.empty.asInstanceOf[ByteArray].at(off)
       } else {
-        !(stream._1) = buf.asInstanceOf[ByteArray].at(off)
+        stream.nextIn = buf.asInstanceOf[ByteArray].at(off)
       }
-      !(stream._2) = nbytes.toUInt
+      stream.availableIn = nbytes.toUInt
     } else {
       throw new ArrayIndexOutOfBoundsException()
     }
@@ -188,40 +193,43 @@ class Deflater(private var compressLevel: Int, noHeader: Boolean) {
     if (stream == null) {
       throw new NullPointerException()
     } else {
-      (!(stream._3)).toLong
+      stream.totalIn.toLong
     }
 
   def getBytesWritten(): Long =
     if (stream == null) {
       throw new NullPointerException()
     } else {
-      (!(stream._6)).toLong
+      stream.totalOut.toLong
     }
 
 }
 
 object Deflater {
-  final val BEST_COMPRESSION: Int    = zlib.Z_BEST_COMPRESSION
-  final val BEST_SPEED: Int          = zlib.Z_BEST_SPEED
+  final val BEST_COMPRESSION: Int = zlib.Z_BEST_COMPRESSION
+  final val BEST_SPEED: Int = zlib.Z_BEST_SPEED
   final val DEFAULT_COMPRESSION: Int = zlib.Z_DEFAULT_COMPRESSION
-  final val DEFAULT_STRATEGY: Int    = zlib.Z_DEFAULT_STRATEGY
-  final val DEFLATED: Int            = zlib.Z_DEFLATED
-  final val FILTERED: Int            = zlib.Z_FILTERED
-  final val FULL_FLUSH: Int          = zlib.Z_FULL_FLUSH
-  final val HUFFMAN_ONLY: Int        = zlib.Z_HUFFMAN_ONLY
-  final val NO_COMPRESSION: Int      = zlib.Z_NO_COMPRESSION
-  final val NO_FLUSH: Int            = zlib.Z_NO_FLUSH
-  final val SYNC_FLUSH: Int          = zlib.Z_SYNC_FLUSH
+  final val DEFAULT_STRATEGY: Int = zlib.Z_DEFAULT_STRATEGY
+  final val DEFLATED: Int = zlib.Z_DEFLATED
+  final val FILTERED: Int = zlib.Z_FILTERED
+  final val FULL_FLUSH: Int = zlib.Z_FULL_FLUSH
+  final val HUFFMAN_ONLY: Int = zlib.Z_HUFFMAN_ONLY
+  final val NO_COMPRESSION: Int = zlib.Z_NO_COMPRESSION
+  final val NO_FLUSH: Int = zlib.Z_NO_FLUSH
+  final val SYNC_FLUSH: Int = zlib.Z_SYNC_FLUSH
 
   private final val empty: Array[Byte] = new Array[Byte](1)
 
   private final val STUB_INPUT_BUFFER: Array[Byte] = new Array[Byte](0)
 
-  private def createStream(level: Int,
-                           strategy: Int,
-                           noHeader: Boolean): zlib.z_streamp = {
-    val stream = stdlib.malloc(sizeof[zlib.z_stream]).cast[zlib.z_streamp]
-    string.memset(stream.cast[Ptr[Byte]], 0, sizeof[zlib.z_stream])
+  private def createStream(
+      level: Int,
+      strategy: Int,
+      noHeader: Boolean
+  ): z_streamp = {
+    val stream = stdlib
+      .calloc(1.toULong, z_stream.size)
+      .asInstanceOf[z_streamp]
     val wbits =
       if (noHeader) 15 / -1
       else 15
@@ -234,7 +242,7 @@ object Deflater {
       strategy
     )
     if (err != zlib.Z_OK) {
-      stdlib.free(stream.cast[Ptr[Byte]])
+      stdlib.free(stream.asInstanceOf[Ptr[Byte]])
       throw new ZipException(err.toString)
     }
     stream

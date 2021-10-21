@@ -1,20 +1,30 @@
 package scala.scalanative
 package posix
 
-import native.{CArray, CChar, CInt, CLong, CStruct7, Nat, Ptr, extern, name}
+import scalanative.unsafe.{
+  CArray,
+  CChar,
+  CInt,
+  CLong,
+  CStruct7,
+  Nat,
+  Ptr,
+  extern,
+  name
+}
+import scalanative.unsafe.Nat._
 import posix.sys.types.pid_t
 
 @extern
 object termios {
-  import Nat._
 
   // types
 
   type tcflag_t = CLong
-  type cc_t     = CChar
-  type speed_t  = CLong
-  type NCCS     = Digit[_2, _0]
-  type c_cc     = CArray[cc_t, NCCS]
+  type cc_t = CChar
+  type speed_t = CLong
+  type NCCS = Digit2[_2, _0]
+  type c_cc = CArray[cc_t, NCCS]
 
   type termios = CStruct7[
     tcflag_t, /* c_iflag - input flags   */
@@ -28,19 +38,21 @@ object termios {
 
   // functions
 
-  def cfgetispeed(termios_p: Ptr[termios]): speed_t              = extern
-  def cfgetospeed(termios_p: Ptr[termios]): speed_t              = extern
+  def cfgetispeed(termios_p: Ptr[termios]): speed_t = extern
+  def cfgetospeed(termios_p: Ptr[termios]): speed_t = extern
   def cfsetispeed(termios_p: Ptr[termios], speed: speed_t): CInt = extern
   def cfsetospeed(termios_p: Ptr[termios], speed: speed_t): CInt = extern
-  def tcdrain(fd: CInt): CInt                                    = extern
-  def tcflow(fd: CInt, action: CInt): CInt                       = extern
-  def tcflush(fd: CInt, queueSelector: CInt): CInt               = extern
-  def tcgetattr(fd: CInt, termios_p: Ptr[termios]): CInt         = extern
-  def tcgetsid(i: CInt): pid_t                                   = extern
-  def tcsendbreak(fd: CInt, duration: CInt): CInt                = extern
-  def tcsetattr(fd: CInt,
-                optionalActions: CInt,
-                termios_p: Ptr[termios]): CInt = extern
+  def tcdrain(fd: CInt): CInt = extern
+  def tcflow(fd: CInt, action: CInt): CInt = extern
+  def tcflush(fd: CInt, queueSelector: CInt): CInt = extern
+  def tcgetattr(fd: CInt, termios_p: Ptr[termios]): CInt = extern
+  def tcgetsid(i: CInt): pid_t = extern
+  def tcsendbreak(fd: CInt, duration: CInt): CInt = extern
+  def tcsetattr(
+      fd: CInt,
+      optionalActions: CInt,
+      termios_p: Ptr[termios]
+  ): CInt = extern
 
   // symbolic constants for use as subscripts for the array c_cc
 

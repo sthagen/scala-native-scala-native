@@ -1,9 +1,10 @@
 package scala.scalanative
 package nscplugin
 
-import scalanative.util.unsupported
+import scala.tools.nsc.Global
+import scalanative.util._
 
-trait NirGenUtil { self: NirGenPhase =>
+trait NirGenUtil[G <: Global with Singleton] { self: NirGenPhase[G] =>
   import global._
   import definitions._
   import nirAddons._
@@ -11,7 +12,7 @@ trait NirGenUtil { self: NirGenPhase =>
   import SimpleType.fromSymbol
 
   def genParamSyms(dd: DefDef, isStatic: Boolean): Seq[Option[Symbol]] = {
-    val vp     = dd.vparamss
+    val vp = dd.vparamss
     val params = if (vp.isEmpty) Nil else vp.head.map(p => Some(p.symbol))
     if (isStatic) params else None +: params
   }
@@ -72,20 +73,18 @@ trait NirGenUtil { self: NirGenPhase =>
           case DoubleTagMethod  => just(DoubleClass)
           case PtrTagMethod     => just(PtrClass)
           case ClassTagMethod   => just(unwrapClassTagOption(args.head).get)
-          case sym if NatBaseTagMethod.contains(sym) =>
-            just(NatBaseClass(NatBaseTagMethod.indexOf(sym)))
-          case NatDigitTagMethod =>
-            wrap(NatDigitClass)
-          case CArrayTagMethod =>
-            wrap(CArrayClass)
           case sym if CStructTagMethod.contains(sym) =>
             wrap(CStructClass(args.length))
+          case CArrayTagMethod =>
+            wrap(CArrayClass)
+          case sym if NatBaseTagMethod.contains(sym) =>
+            just(NatBaseClass(NatBaseTagMethod.indexOf(sym)))
+          case sym if NatDigitTagMethod.contains(sym) =>
+            wrap(NatDigitClass(NatDigitTagMethod.indexOf(sym)))
           case _ =>
             None
         }
-
-      case tree =>
-        None
+      case _ => None
     }
   }
 
@@ -94,73 +93,8 @@ trait NirGenUtil { self: NirGenPhase =>
       unsupported(s"can't recover runtime tag from $tree")
     }
 
-  object CVararg {
-    def unapply(tree: Tree): Option[(SimpleType, Tree)] = tree match {
-      case Apply(fun, Seq(argp, tagp)) if fun.symbol == CVarargMethod =>
-        val st = unwrapTag(tagp)
-        Some((st, argp))
-      case _ =>
-        None
+  def unwrapClassTag(tree: Tree): Symbol =
+    unwrapClassTagOption(tree).getOrElse {
+      unsupported(s"can't recover runtime class tag from $tree")
     }
-  }
-
-  object MaybeAsInstanceOf {
-    def unapply(tree: Tree): Some[Tree] = tree match {
-      case Apply(TypeApply(asInstanceOf_? @ Select(base, _), _), _)
-          if asInstanceOf_?.symbol == Object_asInstanceOf =>
-        Some(base)
-      case _ =>
-        Some(tree)
-    }
-  }
-
-  object MaybeBlock {
-    def unapply(tree: Tree): Some[Tree] = tree match {
-      case Block(Seq(), MaybeBlock(expr)) => Some(expr)
-      case _                              => Some(tree)
-    }
-  }
-
-  object WrapArray {
-    lazy val isWrapArray: Set[Symbol] =
-      Seq(
-        nme.wrapRefArray,
-        nme.wrapByteArray,
-        nme.wrapShortArray,
-        nme.wrapCharArray,
-        nme.wrapIntArray,
-        nme.wrapLongArray,
-        nme.wrapFloatArray,
-        nme.wrapDoubleArray,
-        nme.wrapBooleanArray,
-        nme.wrapUnitArray,
-        nme.genericWrapArray
-      ).map(getMemberMethod(PredefModule, _)).toSet
-
-    def unapply(tree: Apply): Option[Tree] = tree match {
-      case Apply(wrapArray_?, List(wrapped))
-          if isWrapArray(wrapArray_?.symbol) =>
-        Some(wrapped)
-      case _ =>
-        None
-    }
-  }
-
-  object ExternForwarder {
-    // format: OFF
-    def unapply(tree: Tree): Option[Symbol] = tree match {
-      case DefDef(_, _, _, Seq(params), _, Apply(sel @ Select(from, _), args))
-          if from.symbol != null
-          && from.symbol.isExternModule
-          && params.length == args.length
-          && params.zip(args).forall {
-               case (param, arg: RefTree) => param.symbol == arg.symbol
-               case _                     => false
-             } =>
-        Some(sel.symbol)
-      case _ =>
-        None
-    }
-    // format: ON
-  }
 }

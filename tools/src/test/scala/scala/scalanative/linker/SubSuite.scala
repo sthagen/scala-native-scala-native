@@ -21,11 +21,13 @@ class SubSuite extends ReachabilitySuite {
     }
   """
 
+  val MainClass = "Main$"
   val entry = Global.Member(
-    Global.Top("Main$"),
-    Sig.Method("main", Seq(Type.Array(Rt.String), Type.Unit)))
+    Global.Top(MainClass),
+    Sig.Method("main", Seq(Type.Array(Rt.String), Type.Unit))
+  )
 
-  implicit val linked = link(Seq(entry), Seq(source))(x => x)
+  implicit val linked = link(Seq(entry), Seq(source), MainClass)(x => x)
 
   val primitiveTypes = Seq(
     Type.Bool,
@@ -47,9 +49,9 @@ class SubSuite extends ReachabilitySuite {
   val valueTypes =
     primitiveTypes ++ aggregateTypes
 
-  val A  = Type.Ref(Global.Top("A"))
-  val B  = Type.Ref(Global.Top("B"))
-  val C  = Type.Ref(Global.Top("C"))
+  val A = Type.Ref(Global.Top("A"))
+  val B = Type.Ref(Global.Top("B"))
+  val C = Type.Ref(Global.Top("C"))
   val T1 = Type.Ref(Global.Top("T1"))
   val T2 = Type.Ref(Global.Top("T2"))
   val T3 = Type.Ref(Global.Top("T3"))
@@ -96,13 +98,9 @@ class SubSuite extends ReachabilitySuite {
     }
   }
 
-  referenceTypes.foreach { rty =>
-    testIs(Type.Null, rty)
-  }
+  referenceTypes.foreach { rty => testIs(Type.Null, rty) }
 
-  types.foreach { ty =>
-    testIs(Type.Nothing, ty)
-  }
+  types.foreach { ty => testIs(Type.Nothing, ty) }
 
   referenceTypes.foreach { rty =>
     testIs(rty, Type.Ref(Global.Top("java.lang.Object")))

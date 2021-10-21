@@ -1,8 +1,8 @@
-import scala.scalanative.native._
+import scala.scalanative.unsafe._
 import scala.scalanative.libc.stdio._
 
 object Hello {
   def main(args: Array[String]): Unit = {
-    fprintf(stderr, c"Hello, world!")
+    Zone { implicit z => vfprintf(stderr, c"Hello, world!", toCVarArgList()) }
   }
 }

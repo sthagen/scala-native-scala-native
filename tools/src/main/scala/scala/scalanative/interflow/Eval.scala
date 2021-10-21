@@ -5,29 +5,38 @@ import scala.collection.mutable
 import scalanative.nir._
 import scalanative.linker._
 import scalanative.codegen.MemoryLayout
-import scalanative.util.unreachable
+import scalanative.util.{unreachable, And}
 
 trait Eval { self: Interflow =>
-  def run(insts: Array[Inst],
-          offsets: Map[Local, Int],
-          from: Local,
-          blockFresh: Fresh)(implicit state: State): Inst.Cf = {
+  def run(insts: Array[Inst], offsets: Map[Local, Int], from: Local)(implicit
+      state: State
+  ): Inst.Cf = {
+    import state.{materialize, delay}
+
     var pc = offsets(from) + 1
 
     while (true) {
       val inst = insts(pc)
+      implicit val pos: Position = inst.pos
       def bailOut =
         throw BailOut("can't eval inst: " + inst.show)
       inst match {
         case _: Inst.Label =>
           unreachable
         case Inst.Let(local, op, unwind) =>
-          val value = eval(local, op, unwind, blockFresh)
+          if (unwind ne Next.None) {
+            throw BailOut("try-catch")
+          }
+          val value = eval(op)
           if (value.ty == Type.Nothing) {
-            return Inst.Unreachable(unwind)
+            return Inst.Unreachable(unwind)(inst.pos)
           } else {
+            val ty = value match {
+              case InstanceRef(ty) => ty
+              case _               => value.ty
+            }
             val shortUnitValue =
-              if (value.ty == Type.Unit) Val.Unit else value
+              if (ty == Type.Unit) Val.Unit else value
             state.storeLocal(local, shortUnitValue)
             pc += 1
           }
@@ -35,10 +44,13 @@ trait Eval { self: Interflow =>
           return Inst.Ret(eval(v))
         case Inst.Jump(Next.Label(target, args)) =>
           val evalArgs = args.map(eval)
-          return Inst.Jump(Next.Label(target, evalArgs))
-        case Inst.If(cond,
-                     Next.Label(thenTarget, thenArgs),
-                     Next.Label(elseTarget, elseArgs)) =>
+          val next = Next.Label(target, evalArgs)
+          return Inst.Jump(next)
+        case Inst.If(
+              cond,
+              Next.Label(thenTarget, thenArgs),
+              Next.Label(elseTarget, elseArgs)
+            ) =>
           def thenNext =
             Next.Label(thenTarget, thenArgs.map(eval))
           def elseNext =
@@ -49,11 +61,13 @@ trait Eval { self: Interflow =>
             case Val.False =>
               return Inst.Jump(elseNext)
             case cond =>
-              return Inst.If(cond, thenNext, elseNext)
+              return Inst.If(materialize(cond), thenNext, elseNext)
           }
-        case Inst.Switch(scrut,
-                         Next.Label(defaultTarget, defaultArgs),
-                         cases) =>
+        case Inst.Switch(
+              scrut,
+              Next.Label(defaultTarget, defaultArgs),
+              cases
+            ) =>
           def defaultNext =
             Next.Label(defaultTarget, defaultArgs.map(eval))
           eval(scrut) match {
@@ -63,209 +77,211 @@ trait Eval { self: Interflow =>
                   case Next.Case(caseValue, Next.Label(caseTarget, caseArgs))
                       if caseValue == value =>
                     val evalArgs = caseArgs.map(eval)
-                    return Inst.Jump(Next.Label(caseTarget, evalArgs))
+                    val next = Next.Label(caseTarget, evalArgs)
+                    return Inst.Jump(next)
                 }
                 .getOrElse {
                   return Inst.Jump(defaultNext)
                 }
             case scrut =>
-              return Inst.Switch(scrut, defaultNext, cases)
+              return Inst.Switch(materialize(scrut), defaultNext, cases)
           }
         case Inst.Throw(v, unwind) =>
-          val excv = eval(v)
-          unwind match {
-            case Next.None =>
-              return Inst.Throw(excv, Next.None)
-            case Next.Unwind(Val.Local(exc, _), Next.Label(name, args)) =>
-              state.storeLocal(exc, excv)
-              val eargs = args.map(eval)
-              return Inst.Jump(Next.Label(name, eargs))
-            case _ =>
-              unreachable
+          if (unwind ne Next.None) {
+            throw BailOut("try-catch")
           }
+          return Inst.Throw(eval(v), Next.None)
         case Inst.Unreachable(unwind) =>
-          unwind match {
-            case Next.None =>
-              return Inst.Unreachable(unwind)
-            case Next.Unwind(Val.Local(exc, _), Next.Label(name, args)) =>
-              val eexc = Val.Local(state.fresh(), Rt.Object)
-              state.storeLocal(exc, eexc)
-              val eargs = args.map(eval)
-              return Inst.Unreachable(
-                Next.Unwind(eexc, Next.Label(name, eargs)))
-            case _ =>
-              unreachable
+          if (unwind ne Next.None) {
+            throw BailOut("try-catch")
           }
+          return Inst.Unreachable(Next.None)
+        case _ =>
+          bailOut
       }
     }
 
     unreachable
   }
 
-  def eval(local: Local, op: Op, unwind: Next, blockFresh: Fresh)(
-      implicit state: State,
-      linked: linker.Result): Val = {
-    import state.materialize
-    def emit = {
-      if (unwind ne Next.None) {
-        throw BailOut("try-catch")
-      }
-      state.emit
-    }
+  def eval(
+      op: Op
+  )(implicit state: State, linked: linker.Result, origPos: Position): Val = {
+    import state.{emit, materialize, delay}
     def bailOut =
       throw BailOut("can't eval op: " + op.show)
     op match {
       case Op.Call(sig, meth, args) =>
         val emeth = eval(meth)
-        val eargs = args.map(eval)
+
+        def nonIntrinsic = {
+          val eargs = args.map(eval)
+          val argtys = eargs.map {
+            case VirtualRef(_, cls, _) =>
+              cls.ty
+            case DelayedRef(op) =>
+              op.resty
+            case value =>
+              value.ty
+          }
+
+          val (dsig, dtarget) = emeth match {
+            case Val.Global(name, _) =>
+              visitDuplicate(name, argtys)
+                .map { defn => (defn.ty, Val.Global(defn.name, Type.Ptr)) }
+                .getOrElse {
+                  visitRoot(name)
+                  (sig, emeth)
+                }
+            case _ =>
+              (sig, emeth)
+          }
+
+          def fallback = {
+            val mtarget = materialize(dtarget)
+            val margs = adapt(eargs, dsig).map(materialize)
+
+            emit(Op.Call(dsig, mtarget, margs))
+          }
+
+          dtarget match {
+            case Val.Global(name, _) if shallInline(name, eargs) =>
+              `inline`(name, eargs)
+            case DelayedRef(op: Op.Method) if shallPolyInline(op, eargs) =>
+              polyInline(op, eargs)
+            case _ =>
+              fallback
+          }
+        }
 
         emeth match {
           case Val.Global(name, _) if intrinsics.contains(name) =>
-            intrinsic(local, sig, name, eargs, unwind)
-          case _ =>
-            val mmeth   = materialize(emeth)
-            val margs   = eargs.map(materialize(_))
-            val margtys = margs.map(_.ty)
-
-            val (msig, mtarget) = mmeth match {
-              case Val.Global(name, _) =>
-                visitDuplicate(name, margtys)
-                  .map { defn =>
-                    (defn.ty, Val.Global(defn.name, Type.Ptr))
-                  }
-                  .getOrElse {
-                    (sig, mmeth)
-                  }
-              case _ =>
-                (sig, mmeth)
+            intrinsic(sig, name, args).getOrElse {
+              nonIntrinsic
             }
-
-            val isDuplicate =
-              mmeth match {
-                case Val.Global(Global.Member(_, _: Sig.Duplicate), _) =>
-                  true
-                case _ =>
-                  false
-              }
-
-            val cargs =
-              if (!isDuplicate) {
-                margs
-              } else {
-                val Type.Function(sigtys, _) = msig
-
-                // Method target might have a more precise signature
-                // than what's known currently available at the call site.
-                // This is a side effect of a method target selection taking
-                // into account which classes are allocated across whole program.
-                margs.zip(sigtys).map {
-                  case (marg, ty) =>
-                    if (!Sub.is(marg.ty, ty)) {
-                      emit.conv(Conv.Bitcast, ty, marg, unwind)
-                    } else {
-                      marg
-                    }
-                }
-              }
-
-            emit.call(msig, mtarget, cargs, unwind)
+          case _ =>
+            nonIntrinsic
         }
       case Op.Load(ty, ptr) =>
-        emit.load(ty, materialize(eval(ptr)), unwind)
+        emit(Op.Load(ty, materialize(eval(ptr))))
       case Op.Store(ty, ptr, value) =>
-        emit.store(ty, materialize(eval(ptr)), materialize(eval(value)), unwind)
+        emit(Op.Store(ty, materialize(eval(ptr)), materialize(eval(value))))
       case Op.Elem(ty, ptr, indexes) =>
-        emit.elem(ty,
-                  materialize(eval(ptr)),
-                  indexes.map(i => materialize(eval(i))),
-                  unwind)
+        delay(Op.Elem(ty, eval(ptr), indexes.map(eval)))
       case Op.Extract(aggr, indexes) =>
-        emit.extract(materialize(eval(aggr)), indexes, unwind)
+        delay(Op.Extract(eval(aggr), indexes))
       case Op.Insert(aggr, value, indexes) =>
-        emit.insert(materialize(eval(aggr)),
-                    materialize(eval(value)),
-                    indexes,
-                    unwind)
+        delay(Op.Insert(eval(aggr), eval(value), indexes))
       case Op.Stackalloc(ty, n) =>
-        emit.stackalloc(ty, materialize(eval(n)), unwind)
-      case Op.Bin(bin, ty, l, r) =>
+        emit(Op.Stackalloc(ty, materialize(eval(n))))
+      case op @ Op.Bin(bin, ty, l, r) =>
         (eval(l), eval(r)) match {
           case (l, r) if l.isCanonical && r.isCanonical =>
             eval(bin, ty, l, r)
           case (l, r) =>
-            emit.bin(bin, ty, materialize(l), materialize(r), unwind)
+            if (l.isCanonical && op.isCommutative) {
+              combine(bin, ty, r, l)
+            } else {
+              combine(bin, ty, l, r)
+            }
         }
       case Op.Comp(comp, ty, l, r) =>
         (comp, eval(l), eval(r)) match {
           case (_, l, r) if l.isCanonical && r.isCanonical =>
             eval(comp, ty, l, r)
-          case (Comp.Ieq, Val.Virtual(addr), r) if !r.isCanonical =>
-            Val.False
-          case (Comp.Ieq, l, Val.Virtual(addr)) if !r.isCanonical =>
-            Val.False
-          case (Comp.Ine, Val.Virtual(addr), r) if !r.isCanonical =>
-            Val.True
-          case (Comp.Ine, l, Val.Virtual(addr)) if !r.isCanonical =>
-            Val.True
           case (_, l, r) =>
-            emit.comp(comp, ty, materialize(l), materialize(r), unwind)
+            if (l.isCanonical && op.isCommutative) {
+              combine(comp, ty, l, r)
+            } else {
+              combine(comp, ty, r, l)
+            }
         }
       case Op.Conv(conv, ty, value) =>
         eval(value) match {
           case value if value.isCanonical =>
             eval(conv, ty, value)
           case value =>
-            emit.conv(conv, ty, materialize(value), unwind)
+            combine(conv, ty, value)
         }
       case Op.Classalloc(ClassRef(cls)) =>
         Val.Virtual(state.allocClass(cls))
-      case Op.Fieldload(ty, obj, name @ FieldRef(cls, fld)) =>
-        eval(obj) match {
-          case Val.Virtual(addr) =>
-            val instance = state.derefVirtual(addr)
-            instance.values(fld.index)
+      case Op.Fieldload(ty, rawObj, name @ FieldRef(cls, fld)) =>
+        eval(rawObj) match {
+          case VirtualRef(_, _, values) =>
+            values(fld.index)
+          case DelayedRef(op: Op.Box) =>
+            val name = op.ty.asInstanceOf[Type.RefKind].className
+            eval(Op.Unbox(Type.Ref(name), rawObj))
           case obj =>
-            emit.fieldload(ty, materialize(obj), name, unwind)
+            val objty = obj match {
+              case InstanceRef(ty) => ty
+              case _               => obj.ty
+            }
+            objty match {
+              case refty: Type.RefKind
+                  if nir.Type.boxClasses.contains(refty.className)
+                    && !refty.isNullable =>
+                eval(Op.Unbox(Type.Ref(refty.className), rawObj))
+              case _ =>
+                emit(Op.Fieldload(ty, materialize(obj), name))
+            }
         }
       case Op.Fieldstore(ty, obj, name @ FieldRef(cls, fld), value) =>
         eval(obj) match {
-          case Val.Virtual(addr) =>
-            val instance = state.derefVirtual(addr)
-            instance.values(fld.index) = eval(value)
+          case VirtualRef(_, _, values) =>
+            values(fld.index) = eval(value)
             Val.Unit
           case obj =>
-            emit.fieldstore(ty,
-                            materialize(obj),
-                            name,
-                            materialize(eval(value)),
-                            unwind)
+            emit(
+              Op
+                .Fieldstore(
+                  ty,
+                  materialize(obj),
+                  name,
+                  materialize(eval(value))
+                )
+            )
         }
-      case Op.Method(obj, sig) =>
-        eval(obj) match {
-          case Val.Virtual(addr) =>
-            val cls      = state.deref(addr).cls
-            val resolved = cls.resolve(sig).get
-            Val.Global(resolved, Type.Ptr)
-          case obj if obj.ty == Type.Null =>
-            emit.method(materialize(obj), sig, unwind)
-          case obj =>
-            val targets = obj.ty match {
-              case ExactClassRef(cls, _) =>
-                cls.resolve(sig).toSeq
-              case ScopeRef(scope) =>
-                scope.targets(sig)
-              case _ =>
-                bailOut
-            }
-            targets match {
-              case Seq() =>
-                Val.Zero(Type.Nothing)
-              case Seq(meth) =>
-                Val.Global(meth, Type.Ptr)
-              case meths =>
-                meths.foreach(visitRoot)
-                emit.method(materialize(obj), sig, unwind)
-            }
+      case Op.Method(rawObj, sig) =>
+        val obj = eval(rawObj)
+        val objty = {
+          /* If method is not virtual (eg. constructor) we need to ensure that
+           * we would fetch for expected type targets (rawObj) instead of real (evaluated) type
+           * It might result in calling wrong method and lead to infinite loops, eg. issue #1909
+           */
+          val realType = obj match {
+            case InstanceRef(ty) => ty
+            case _               => obj.ty
+          }
+          val expectedType = rawObj.ty
+          val shallUseExpectedType = !sig.isVirtual &&
+            Sub.is(realType, expectedType) && !Sub.is(expectedType, realType)
+
+          if (shallUseExpectedType) expectedType
+          else realType
+        }
+
+        val targets = objty match {
+          case Type.Null =>
+            Seq.empty
+          case ExactClassRef(cls, _) =>
+            cls.resolve(sig).toSeq
+          case ClassRef(cls) if !sig.isVirtual =>
+            cls.resolve(sig).toSeq
+          case ScopeRef(scope) =>
+            scope.targets(sig)
+          case _ =>
+            bailOut
+        }
+
+        if (targets.size == 0) {
+          emit(Op.Method(materialize(obj), sig))
+          Val.Zero(Type.Nothing)
+        } else if (targets.size == 1) {
+          Val.Global(targets.head, Type.Ptr)
+        } else {
+          targets.foreach(visitRoot)
+          delay(Op.Method(materialize(obj), sig))
         }
       case Op.Dynmethod(obj, dynsig) =>
         linked.dynimpls.foreach {
@@ -274,84 +290,105 @@ trait Eval { self: Interflow =>
           case _ =>
             ()
         }
-        emit.dynmethod(materialize(eval(obj)), dynsig, unwind)
+        emit(Op.Dynmethod(materialize(eval(obj)), dynsig))
       case Op.Module(clsName) =>
-        val init = clsName member Sig.Ctor(Seq.empty)
-        if (originals.contains(init)) {
-          visitRoot(init)
+        val isPure =
+          isPureModule(clsName)
+        val isWhitelisted =
+          Whitelist.pure.contains(clsName)
+        val canDelay =
+          isPure || isWhitelisted
+
+        if (canDelay) {
+          delay(Op.Module(clsName))
+        } else {
+          emit(Op.Module(clsName))
         }
-        emit.module(clsName, unwind)
-      case Op.As(ty, obj) =>
+      case Op.As(ty, rawObj) =>
         val refty = ty match {
           case ty: Type.RefKind => ty
           case _                => bailOut
         }
-        eval(obj) match {
-          case obj @ Val.Virtual(addr)
-              if Sub.is(state.deref(addr).cls, refty) =>
-            obj
-          case obj if obj.ty == Type.Null =>
-            obj
-          case obj =>
-            obj.ty match {
-              case ClassRef(cls) if Sub.is(cls, refty) =>
-                obj
-              case _ =>
-                emit.as(ty, materialize(obj), unwind)
-            }
+        val obj = eval(rawObj)
+        def fallback =
+          emit(Op.As(ty, materialize(obj)))
+        val objty = obj match {
+          case InstanceRef(ty) =>
+            ty
+          case _ =>
+            obj.ty
         }
-      case Op.Is(ty, obj) =>
+        objty match {
+          case Type.Null =>
+            Val.Null
+          case ScopeRef(scope) if Sub.is(scope, refty) =>
+            obj
+          case _ =>
+            fallback
+        }
+      case Op.Is(ty, rawObj) =>
         val refty = ty match {
           case ty: Type.RefKind => ty
           case _                => bailOut
         }
-        eval(obj) match {
-          case Val.Virtual(addr) =>
-            Val.Bool(Sub.is(state.deref(addr).cls, refty))
-          case obj if obj.ty == Type.Null =>
+        val obj = eval(rawObj)
+        def fallback =
+          delay(Op.Is(refty, obj))
+        def objNotNull =
+          delay(Op.Comp(Comp.Ine, Rt.Object, obj, Val.Null))
+        val objty = obj match {
+          case InstanceRef(ty) =>
+            ty
+          case _ =>
+            obj.ty
+        }
+        objty match {
+          case Type.Null =>
             Val.False
-          case obj =>
-            obj.ty match {
-              case ExactClassRef(cls, nullable) =>
-                val isStatically = Sub.is(cls, refty)
-                val res = if (!isStatically) {
-                  Val.False
-                } else if (!nullable) {
-                  Val.True
-                } else {
-                  emit.comp(Comp.Ine, Rt.Object, obj, Val.Null, unwind)
-                }
-                log(
-                  s"isinstanceof ${obj.ty.show} a ${cls.ty.show} ? ${res.show}")
-                res
-              case _ =>
-                emit.is(refty, materialize(obj), unwind)
+          case And(scoperef: Type.RefKind, ScopeRef(scope)) =>
+            if (Sub.is(scope, refty)) {
+              if (!scoperef.isNullable) {
+                Val.True
+              } else {
+                objNotNull
+              }
+            } else if (scoperef.isExact) {
+              Val.False
+            } else {
+              fallback
             }
+          case _ =>
+            fallback
         }
       case Op.Copy(v) =>
         eval(v)
       case Op.Sizeof(ty) =>
         Val.Long(MemoryLayout.sizeOf(ty))
-      case Op.Box(Type.Ref(boxname, _, _), value) =>
-        Val.Virtual(state.allocBox(boxname, eval(value)))
+      case Op.Box(boxty @ Type.Ref(boxname, _, _), value) =>
+        // Pointer boxes are special because null boxes to null,
+        // which breaks the invariant that all virtual allocations
+        // are in fact non-null. We handle them as a delayed op instead.
+        if (!Type.isPtrBox(boxty)) {
+          Val.Virtual(state.allocBox(boxname, eval(value)))
+        } else {
+          delay(Op.Box(boxty, eval(value)))
+        }
       case Op.Unbox(boxty @ Type.Ref(boxname, _, _), value) =>
         eval(value) match {
-          case Val.Virtual(addr) =>
-            val instance = state.derefVirtual(addr)
-            if (boxname == instance.cls.name) {
-              instance.values(0)
-            } else {
-              Val.Zero(Type.Nothing)
-            }
+          case VirtualRef(_, cls, Array(value)) if boxname == cls.name =>
+            value
+          case DelayedRef(Op.Box(Type.Ref(innername, _, _), innervalue))
+              if innername == boxname =>
+            innervalue
           case value =>
-            emit.unbox(boxty, materialize(value), unwind)
+            emit(Op.Unbox(boxty, materialize(value)))
         }
       case Op.Arrayalloc(ty, init) =>
         eval(init) match {
-          case Val.Int(count) if count < 4096 =>
+          case Val.Int(count) if count <= 128 =>
             Val.Virtual(state.allocArray(ty, count))
-          case Val.ArrayValue(_, values) if values.size < 4096 =>
-            val addr     = state.allocArray(ty, values.size)
+          case Val.ArrayValue(_, values) if values.size <= 128 =>
+            val addr = state.allocArray(ty, values.size)
             val instance = state.derefVirtual(addr)
             values.zipWithIndex.foreach {
               case (v, idx) =>
@@ -359,58 +396,38 @@ trait Eval { self: Interflow =>
             }
             Val.Virtual(addr)
           case init =>
-            emit.arrayalloc(ty, materialize(init), unwind)
+            emit(Op.Arrayalloc(ty, materialize(init)))
         }
       case Op.Arrayload(ty, arr, idx) =>
         (eval(arr), eval(idx)) match {
-          case (Val.Virtual(addr), Val.Int(offset)) =>
-            val instance = state.derefVirtual(addr)
-            instance.values(offset)
+          case (VirtualRef(_, _, values), Val.Int(offset))
+              if inBounds(values, offset) =>
+            values(offset)
           case (arr, idx) =>
-            emit.arrayload(ty, materialize(arr), materialize(idx), unwind)
+            emit(Op.Arrayload(ty, materialize(arr), materialize(idx)))
         }
       case Op.Arraystore(ty, arr, idx, value) =>
         (eval(arr), eval(idx)) match {
-          case (Val.Virtual(addr), Val.Int(offset)) =>
-            val instance = state.derefVirtual(addr)
-            instance.values(offset) = eval(value)
+          case (VirtualRef(_, _, values), Val.Int(offset))
+              if inBounds(values, offset) =>
+            values(offset) = eval(value)
             Val.Unit
           case (arr, idx) =>
-            def fallback =
-              emit.arraystore(ty,
-                              materialize(arr),
-                              materialize(idx),
-                              materialize(eval(value)),
-                              unwind)
-            eval(value) match {
-              case Val.Virtual(addr) =>
-                arr.ty match {
-                  case ArrayRef(elemty, _) =>
-                    state.deref(addr).cls.ty match {
-                      case BoxRef(boxty) if elemty == boxty =>
-                        val boxvalue = state.derefVirtual(addr).values(0)
-                        emit.arraystore(elemty,
-                                        materialize(arr),
-                                        materialize(idx),
-                                        materialize(boxvalue),
-                                        unwind)
-                      case _ =>
-                        fallback
-                    }
-                  case _ =>
-                    fallback
-                }
-              case _ =>
-                fallback
-            }
+            emit(
+              Op.Arraystore(
+                ty,
+                materialize(arr),
+                materialize(idx),
+                materialize(eval(value))
+              )
+            )
         }
       case Op.Arraylength(arr) =>
         eval(arr) match {
-          case Val.Virtual(addr) =>
-            val instance = state.derefVirtual(addr)
-            Val.Int(instance.values.length)
+          case VirtualRef(_, _, values) =>
+            Val.Int(values.length)
           case arr =>
-            emit.arraylength(materialize(arr), unwind)
+            emit(Op.Arraylength(materialize(arr)))
         }
       case Op.Var(ty) =>
         Val.Local(state.newVar(ty), Type.Var(ty))
@@ -421,10 +438,17 @@ trait Eval { self: Interflow =>
         val Val.Local(local, _) = eval(slot)
         state.storeVar(local, eval(value))
         Val.Unit
+      case _ => util.unreachable
     }
   }
 
-  def eval(bin: Bin, ty: Type, l: Val, r: Val)(implicit state: State): Val = {
+  def eval(bin: Bin, ty: Type, l: Val, r: Val)(implicit
+      state: State,
+      origPos: Position
+  ): Val = {
+    import state.{emit, materialize}
+    def fallback =
+      emit(Op.Bin(bin, ty, materialize(l), materialize(r)))
     def bailOut =
       throw BailOut(s"can't eval bin op: $bin[${ty.show}] ${l.show}, ${r.show}")
     bin match {
@@ -466,19 +490,35 @@ trait Eval { self: Interflow =>
         }
       case Bin.Sdiv =>
         (l, r) match {
-          case (Val.Int(l), Val.Int(r)) if r != 0 =>
-            Val.Int(l / r)
-          case (Val.Long(l), Val.Long(r)) if r != 0L =>
-            Val.Long(l / r)
+          case (Val.Int(l), Val.Int(r)) =>
+            if (r != 0) {
+              Val.Int(l / r)
+            } else {
+              fallback
+            }
+          case (Val.Long(l), Val.Long(r)) =>
+            if (r != 0L) {
+              Val.Long(l / r)
+            } else {
+              fallback
+            }
           case _ =>
             bailOut
         }
       case Bin.Udiv =>
         (l, r) match {
-          case (Val.Int(l), Val.Int(r)) if r != 0 =>
-            Val.Int(java.lang.Integer.divideUnsigned(l, r))
-          case (Val.Long(l), Val.Long(r)) if r != 0 =>
-            Val.Long(java.lang.Long.divideUnsigned(l, r))
+          case (Val.Int(l), Val.Int(r)) =>
+            if (r != 0) {
+              Val.Int(java.lang.Integer.divideUnsigned(l, r))
+            } else {
+              fallback
+            }
+          case (Val.Long(l), Val.Long(r)) =>
+            if (r != 0) {
+              Val.Long(java.lang.Long.divideUnsigned(l, r))
+            } else {
+              fallback
+            }
           case _ =>
             bailOut
         }
@@ -490,19 +530,35 @@ trait Eval { self: Interflow =>
         }
       case Bin.Srem =>
         (l, r) match {
-          case (Val.Int(l), Val.Int(r)) if r != 0 =>
-            Val.Int(l % r)
-          case (Val.Long(l), Val.Long(r)) if r != 0L =>
-            Val.Long(l % r)
+          case (Val.Int(l), Val.Int(r)) =>
+            if (r != 0) {
+              Val.Int(l % r)
+            } else {
+              fallback
+            }
+          case (Val.Long(l), Val.Long(r)) =>
+            if (r != 0L) {
+              Val.Long(l % r)
+            } else {
+              fallback
+            }
           case _ =>
             bailOut
         }
       case Bin.Urem =>
         (l, r) match {
-          case (Val.Int(l), Val.Int(r)) if r != 0 =>
-            Val.Int(java.lang.Integer.remainderUnsigned(l, r))
-          case (Val.Long(l), Val.Long(r)) if r != 0L =>
-            Val.Long(java.lang.Long.remainderUnsigned(l, r))
+          case (Val.Int(l), Val.Int(r)) =>
+            if (r != 0) {
+              Val.Int(java.lang.Integer.remainderUnsigned(l, r))
+            } else {
+              fallback
+            }
+          case (Val.Long(l), Val.Long(r)) =>
+            if (r != 0L) {
+              Val.Long(java.lang.Long.remainderUnsigned(l, r))
+            } else {
+              fallback
+            }
           case _ =>
             bailOut
         }
@@ -557,7 +613,8 @@ trait Eval { self: Interflow =>
   def eval(comp: Comp, ty: Type, l: Val, r: Val)(implicit state: State): Val = {
     def bailOut =
       throw BailOut(
-        s"can't eval comp op: $comp[${ty.show}] ${l.show}, ${r.show}")
+        s"can't eval comp op: $comp[${ty.show}] ${l.show}, ${r.show}"
+      )
     comp match {
       case Comp.Ieq =>
         (l, r) match {
@@ -565,12 +622,9 @@ trait Eval { self: Interflow =>
           case (Val.Int(l), Val.Int(r))             => Val.Bool(l == r)
           case (Val.Long(l), Val.Long(r))           => Val.Bool(l == r)
           case (Val.Null, Val.Null)                 => Val.True
-          case (Val.Virtual(l), Val.Virtual(r))     => Val.Bool(l == r)
           case (Val.Global(l, _), Val.Global(r, _)) => Val.Bool(l == r)
-          case (Val.Null | _: Val.Virtual | _: Val.Global,
-                Val.Null | _: Val.Virtual | _: Val.Global) =>
-            Val.False
-          case _ => bailOut
+          case (Val.Null | _: Val.Global, Val.Null | _: Val.Global) => Val.False
+          case _                                                    => bailOut
         }
       case Comp.Ine =>
         (l, r) match {
@@ -578,12 +632,9 @@ trait Eval { self: Interflow =>
           case (Val.Int(l), Val.Int(r))             => Val.Bool(l != r)
           case (Val.Long(l), Val.Long(r))           => Val.Bool(l != r)
           case (Val.Null, Val.Null)                 => Val.False
-          case (Val.Virtual(l), Val.Virtual(r))     => Val.Bool(l != r)
           case (Val.Global(l, _), Val.Global(r, _)) => Val.Bool(l != r)
-          case (Val.Null | _: Val.Virtual | _: Val.Global,
-                Val.Null | _: Val.Virtual | _: Val.Global) =>
-            Val.True
-          case _ => bailOut
+          case (Val.Null | _: Val.Global, Val.Null | _: Val.Global) => Val.True
+          case _                                                    => bailOut
         }
       case Comp.Ugt =>
         (l, r) match {
@@ -692,18 +743,23 @@ trait Eval { self: Interflow =>
         value
       case Conv.Trunc =>
         (value, ty) match {
+          case (Val.Char(v), Type.Byte)  => Val.Byte(v.toByte)
           case (Val.Short(v), Type.Byte) => Val.Byte(v.toByte)
           case (Val.Int(v), Type.Byte)   => Val.Byte(v.toByte)
           case (Val.Int(v), Type.Short)  => Val.Short(v.toShort)
           case (Val.Int(v), Type.Char)   => Val.Char(v.toChar)
-          case (Val.Long(v), Type.Byte)  => Val.Int(v.toByte)
-          case (Val.Long(v), Type.Short) => Val.Int(v.toShort)
+          case (Val.Long(v), Type.Byte)  => Val.Byte(v.toByte)
+          case (Val.Long(v), Type.Short) => Val.Short(v.toShort)
           case (Val.Long(v), Type.Int)   => Val.Int(v.toInt)
           case (Val.Long(v), Type.Char)  => Val.Char(v.toChar)
           case _                         => bailOut
         }
       case Conv.Zext =>
         (value, ty) match {
+          case (Val.Char(v), Type.Int) =>
+            Val.Int(v.toInt)
+          case (Val.Char(v), Type.Long) =>
+            Val.Long(v.toLong)
           case (Val.Short(v), Type.Int) =>
             Val.Int(v.toChar.toInt)
           case (Val.Short(v), Type.Long) =>
@@ -716,6 +772,7 @@ trait Eval { self: Interflow =>
       case Conv.Sext =>
         (value, ty) match {
           case (Val.Byte(v), Type.Short) => Val.Short(v.toShort)
+          case (Val.Byte(v), Type.Char)  => Val.Char(v.toChar)
           case (Val.Byte(v), Type.Int)   => Val.Int(v.toInt)
           case (Val.Byte(v), Type.Long)  => Val.Long(v.toLong)
           case (Val.Short(v), Type.Int)  => Val.Int(v.toInt)
@@ -734,7 +791,11 @@ trait Eval { self: Interflow =>
           case _                           => bailOut
         }
       case Conv.Fptoui =>
-        bailOut
+        (value, ty) match {
+          case (Val.Float(v), Type.Char)  => Val.Char(v.toChar)
+          case (Val.Double(v), Type.Char) => Val.Char(v.toChar)
+          case _                          => bailOut
+        }
       case Conv.Fptosi =>
         (value, ty) match {
           case (Val.Float(v), Type.Int)   => Val.Int(v.toInt)
@@ -744,14 +805,22 @@ trait Eval { self: Interflow =>
           case _                          => bailOut
         }
       case Conv.Uitofp =>
-        bailOut
+        (value, ty) match {
+          case (Val.Char(v), Type.Float)  => Val.Float(v.toInt.toFloat)
+          case (Val.Char(v), Type.Double) => Val.Double(v.toInt.toFloat)
+          case _                          => bailOut
+        }
       case Conv.Sitofp =>
         (value, ty) match {
-          case (Val.Int(v), Type.Float)   => Val.Float(v.toFloat)
-          case (Val.Int(v), Type.Double)  => Val.Double(v.toDouble)
-          case (Val.Long(v), Type.Float)  => Val.Float(v.toFloat)
-          case (Val.Long(v), Type.Double) => Val.Double(v.toDouble)
-          case _                          => bailOut
+          case (Val.Byte(v), Type.Float)   => Val.Float(v.toFloat)
+          case (Val.Byte(v), Type.Double)  => Val.Double(v.toDouble)
+          case (Val.Short(v), Type.Float)  => Val.Float(v.toFloat)
+          case (Val.Short(v), Type.Double) => Val.Double(v.toDouble)
+          case (Val.Int(v), Type.Float)    => Val.Float(v.toFloat)
+          case (Val.Int(v), Type.Double)   => Val.Double(v.toDouble)
+          case (Val.Long(v), Type.Float)   => Val.Float(v.toFloat)
+          case (Val.Long(v), Type.Double)  => Val.Double(v.toDouble)
+          case _                           => bailOut
         }
       case Conv.Ptrtoint =>
         (value, ty) match {
@@ -767,6 +836,10 @@ trait Eval { self: Interflow =>
         (value, ty) match {
           case (value, ty) if value.ty == ty =>
             value
+          case (Val.Char(value), Type.Short) =>
+            Val.Short(value.toShort)
+          case (Val.Short(value), Type.Char) =>
+            Val.Char(value.toChar)
           case (Val.Int(value), Type.Float) =>
             Val.Float(java.lang.Float.intBitsToFloat(value))
           case (Val.Long(value), Type.Double) =>
@@ -775,25 +848,144 @@ trait Eval { self: Interflow =>
             Val.Int(java.lang.Float.floatToRawIntBits(value))
           case (Val.Double(value), Type.Long) =>
             Val.Long(java.lang.Double.doubleToRawLongBits(value))
+          case (Val.Null, Type.Ptr) =>
+            Val.Null
           case _ =>
             bailOut
         }
     }
   }
 
-  def eval(value: Val)(implicit state: State): Val = value match {
-    case Val.Local(local, _) if local.id >= 0 =>
-      state.loadLocal(local) match {
-        case value: Val.Virtual =>
-          eval(value)
-        case value =>
-          value
+  def eval(value: Val)(implicit state: State, origPos: Position): Val = {
+    value match {
+      case Val.Local(local, _) if local.id >= 0 =>
+        state.loadLocal(local) match {
+          case value: Val.Virtual =>
+            eval(value)
+          case value =>
+            value
+        }
+      case Val.Virtual(addr) if state.hasEscaped(addr) =>
+        state.derefEscaped(addr).escapedValue
+      case Val.String(value) =>
+        Val.Virtual(state.allocString(value))
+      case Val.Global(name, _) =>
+        maybeOriginal(name).foreach {
+          case defn if defn.attrs.isExtern =>
+            visitRoot(defn.name)
+          case _ =>
+            ()
+        }
+        value
+      case _ =>
+        value.canonicalize
+    }
+  }
+
+  private def inBounds(values: Array[Val], offset: Int): Boolean = {
+    inBounds(values.length, offset)
+  }
+
+  private def inBounds(length: Int, offset: Int): Boolean = {
+    offset >= 0 && offset < length
+  }
+
+  private def isPureModule(clsName: Global): Boolean = {
+    var visiting = List[Global]()
+
+    def isPureModule(clsName: Global): Boolean = {
+      if (hasModulePurity(clsName)) {
+        getModulePurity(clsName)
+      } else {
+        visiting = clsName :: visiting
+
+        val init = clsName member Sig.Ctor(Seq.empty)
+        val isPure =
+          if (!shallVisit(init)) {
+            true
+          } else {
+            visitDuplicate(init, argumentTypes(init)).fold {
+              false
+            } { defn => isPureModuleCtor(defn) }
+          }
+        setModulePurity(clsName, isPure)
+        isPure
       }
-    case Val.Virtual(addr) if state.escaped(addr) =>
-      state.derefEscaped(addr).escapedValue
-    case Val.String(value) =>
-      Val.Virtual(state.allocString(value))
-    case _ =>
-      value.canonicalize
+    }
+
+    def isPureModuleCtor(defn: Defn.Define): Boolean = {
+      val Inst.Label(_, Val.Local(self, _) +: _) = defn.insts.head
+
+      val canStoreTo = mutable.Set(self)
+      val arrayLength = mutable.Map.empty[Local, Int]
+
+      defn.insts.foreach {
+        case Inst.Let(n, Op.Arrayalloc(_, init), _) =>
+          canStoreTo += n
+          init match {
+            case Val.Int(size) =>
+              arrayLength(n) = size
+            case Val.ArrayValue(_, elems) =>
+              arrayLength(n) = elems.size
+            case _ =>
+              ()
+          }
+        case Inst.Let(n, _: Op.Classalloc | _: Op.Box | _: Op.Module, _) =>
+          canStoreTo += n
+        case _ =>
+          ()
+      }
+
+      def canStoreValue(v: Val): Boolean = v match {
+        case _ if v.isCanonical => true
+        case Val.Local(n, _)    => canStoreTo.contains(n)
+        case _: Val.String      => true
+        case _                  => false
+      }
+
+      defn.insts.forall {
+        case inst @ (_: Inst.Throw | _: Inst.Unreachable) =>
+          false
+        case _: Inst.Label =>
+          true
+        case _: Inst.Cf =>
+          true
+        case Inst.Let(_, op, _) if op.isPure =>
+          true
+        case Inst.Let(_, _: Op.Classalloc | _: Op.Arrayalloc | _: Op.Box, _) =>
+          true
+        case inst @ Inst.Let(_, Op.Module(name), _) =>
+          if (!visiting.contains(name)) {
+            isPureModule(name)
+          } else {
+            false
+          }
+        case Inst.Let(_, Op.Fieldload(_, Val.Local(to, _), _), _)
+            if canStoreTo.contains(to) =>
+          true
+        case inst @ Inst.Let(_, Op.Fieldstore(_, Val.Local(to, _), _, value), _)
+            if canStoreTo.contains(to) =>
+          canStoreValue(value)
+        case Inst.Let(_, Op.Arrayload(_, Val.Local(to, _), Val.Int(idx)), _)
+            if canStoreTo.contains(to)
+              && inBounds(arrayLength.getOrElse(to, -1), idx) =>
+          true
+        case Inst.Let(
+              _,
+              Op.Arraystore(_, Val.Local(to, _), Val.Int(idx), value),
+              _
+            )
+            if canStoreTo.contains(to)
+              && inBounds(arrayLength.getOrElse(to, -1), idx) =>
+          canStoreValue(value)
+        case Inst.Let(_, Op.Arraylength(Val.Local(to, _)), _)
+            if canStoreTo.contains(to) =>
+          true
+        case inst =>
+          false
+      }
+    }
+
+    isPureModule(clsName)
   }
 }

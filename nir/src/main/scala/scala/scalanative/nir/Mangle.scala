@@ -1,5 +1,7 @@
 package scala.scalanative
 package nir
+import scala.scalanative.nir.Sig.Scope.{Private, Public}
+import scala.scalanative.util.ShowBuilder.InMemoryShowBuilder
 
 object Mangle {
   def apply(ty: Type): String = {
@@ -14,14 +16,14 @@ object Mangle {
     impl.toString
   }
 
-  def apply(sig: Sig): String = {
+  def apply(sig: Sig.Unmangled): String = {
     val impl = new Impl
-    impl.mangleSig(sig)
+    impl.mangleUnmangledSig(sig)
     impl.toString
   }
 
   private class Impl {
-    val sb = new scalanative.util.ShowBuilder
+    val sb = new InMemoryShowBuilder
     import sb._
 
     def mangleGlobal(name: Global): Unit = name match {
@@ -40,19 +42,32 @@ object Mangle {
         util.unreachable
     }
 
-    def mangleSig(sig: Sig): Unit = sig match {
-      case Sig.Field(id) =>
+    def mangleSig(sig: Sig): Unit =
+      str(sig.mangle)
+
+    def mangleSigScope(scope: Sig.Scope): Unit = scope match {
+      case Public      => str("O")
+      case Private(in) => str("P"); mangleGlobal(in)
+    }
+
+    def mangleUnmangledSig(sig: Sig.Unmangled): Unit = sig match {
+      case Sig.Field(id, scope) =>
         str("F")
         mangleIdent(id)
+        mangleSigScope(scope)
       case Sig.Ctor(types) =>
         str("R")
         types.foreach(mangleType)
         str("E")
-      case Sig.Method(id, types) =>
+      case Sig.Clinit() =>
+        str("I")
+        str("E")
+      case Sig.Method(id, types, scope) =>
         str("D")
         mangleIdent(id)
         types.foreach(mangleType)
         str("E")
+        mangleSigScope(scope)
       case Sig.Proxy(id, types) =>
         str("P")
         mangleIdent(id)
@@ -101,13 +116,19 @@ object Mangle {
         str("E")
 
       case Type.Array(ty, nullable) =>
-        if (nullable) { str("L") }
+        if (nullable) {
+          str("L")
+        }
         str("A")
         mangleType(ty)
         str("_")
       case Type.Ref(Global.Top(id), exact, nullable) =>
-        if (nullable) { str("L") }
-        if (exact) { str("X") }
+        if (nullable) {
+          str("L")
+        }
+        if (exact) {
+          str("X")
+        }
         mangleIdent(id)
       case _ =>
         util.unreachable
@@ -115,6 +136,7 @@ object Mangle {
 
     def mangleIdent(id: String): Unit = {
       str(id.length)
+      if (id.head.isDigit || id.head == '-') str('-')
       str(id)
     }
 

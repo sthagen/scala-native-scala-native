@@ -1,12 +1,14 @@
 package java.io
 
-import java.nio.charset.Charset
+import java.nio.charset.{Charset, UnsupportedCharsetException}
 import java.util.Formatter
+import java.util.Objects
 
-class PrintStream private (_out: OutputStream,
-                           autoFlush: Boolean,
-                           charset: Charset)
-    extends FilterOutputStream(_out)
+class PrintStream private (
+    _out: OutputStream,
+    autoFlush: Boolean,
+    charset: Charset
+) extends FilterOutputStream(_out)
     with Appendable
     with Closeable {
 
@@ -37,13 +39,30 @@ class PrintStream private (_out: OutputStream,
     this(out, autoFlush, null: Charset)
 
   def this(out: OutputStream, autoFlush: Boolean, encoding: String) =
-    this(out, autoFlush, Charset.forName(encoding))
+    this(
+      out,
+      autoFlush,
+      try {
+        Charset.forName(Objects.requireNonNull(encoding))
+      } catch {
+        case e: UnsupportedCharsetException =>
+          throw new java.io.UnsupportedEncodingException(encoding)
+      }
+    )
 
   /* The following constructors, although implemented, will not link, since
    * File, FileOutputStream and BufferedOutputStream are not implemented.
    * They're here just in case a third-party library on the classpath
    * implements those.
    */
+
+  /* Cravenly pass the possibly null, possibly unsupported charSet String
+   * through to whatever third-party software satisfies the link.
+   * Let it deal with converting UnsupportedCharsetException to
+   * UnsupportedEncodingException. Since the code will not link, there
+   * is no good way to test that conversion for these two items.
+   */
+
   def this(file: File) =
     this(new BufferedOutputStream(new FileOutputStream(file)))
   def this(file: File, csn: String) =
@@ -55,7 +74,7 @@ class PrintStream private (_out: OutputStream,
 
   private lazy val encoder = {
     val c =
-      if (charset == null) Charset.defaultCharset
+      if (charset == null) Charset.defaultCharset()
       else charset
     /* We pass `this` as the output stream for the encoding writer so that
      * we can apply auto-flushing. Note that this will flush() more often
@@ -65,8 +84,8 @@ class PrintStream private (_out: OutputStream,
     new OutputStreamWriter(this, c)
   }
 
-  private var closing: Boolean   = false
-  private var closed: Boolean    = false
+  private var closing: Boolean = false
+  private var closed: Boolean = false
   private var errorFlag: Boolean = false
 
   override def flush(): Unit =
@@ -103,7 +122,7 @@ class PrintStream private (_out: OutputStream,
     }
   }
 
-  protected[io] def setError(): Unit   = errorFlag = true
+  protected[io] def setError(): Unit = errorFlag = true
   protected[io] def clearError(): Unit = errorFlag = false
 
   /* Note that calling directly the write() methods will happily bypass the
@@ -139,13 +158,13 @@ class PrintStream private (_out: OutputStream,
     }
   }
 
-  def print(b: Boolean): Unit  = printString(String.valueOf(b))
-  def print(c: Char): Unit     = printString(String.valueOf(c))
-  def print(i: Int): Unit      = printString(String.valueOf(i))
-  def print(l: Long): Unit     = printString(String.valueOf(l))
-  def print(f: Float): Unit    = printString(String.valueOf(f))
-  def print(d: Double): Unit   = printString(String.valueOf(d))
-  def print(s: String): Unit   = printString(if (s == null) "null" else s)
+  def print(b: Boolean): Unit = printString(String.valueOf(b))
+  def print(c: Char): Unit = printString(String.valueOf(c))
+  def print(i: Int): Unit = printString(String.valueOf(i))
+  def print(l: Long): Unit = printString(String.valueOf(l))
+  def print(f: Float): Unit = printString(String.valueOf(f))
+  def print(d: Double): Unit = printString(String.valueOf(d))
+  def print(s: String): Unit = printString(if (s == null) "null" else s)
   def print(obj: AnyRef): Unit = printString(String.valueOf(obj))
 
   private def printString(s: String): Unit = ensureOpenAndTrapIOExceptions {
@@ -159,21 +178,21 @@ class PrintStream private (_out: OutputStream,
   }
 
   def println(): Unit = ensureOpenAndTrapIOExceptions {
-    encoder.write('\n') // In Scala.js the line separator is always LF
+    encoder.write(System.lineSeparator())
     encoder.flushBuffer()
     if (autoFlush)
       flush()
   }
 
-  def println(b: Boolean): Unit     = { print(b); println() }
-  def println(c: Char): Unit        = { print(c); println() }
-  def println(i: Int): Unit         = { print(i); println() }
-  def println(l: Long): Unit        = { print(l); println() }
-  def println(f: Float): Unit       = { print(f); println() }
-  def println(d: Double): Unit      = { print(d); println() }
+  def println(b: Boolean): Unit = { print(b); println() }
+  def println(c: Char): Unit = { print(c); println() }
+  def println(i: Int): Unit = { print(i); println() }
+  def println(l: Long): Unit = { print(l); println() }
+  def println(f: Float): Unit = { print(f); println() }
+  def println(d: Double): Unit = { print(d); println() }
   def println(s: Array[Char]): Unit = { print(s); println() }
-  def println(s: String): Unit      = { print(s); println() }
-  def println(obj: AnyRef): Unit    = { print(obj); println() }
+  def println(s: String): Unit = { print(s); println() }
+  def println(obj: AnyRef): Unit = { print(obj); println() }
 
   def printf(fmt: String, args: Array[Object]): PrintStream =
     format(fmt, args)
@@ -214,7 +233,8 @@ class PrintStream private (_out: OutputStream,
   }
 
   @inline private[this] def ensureOpenAndTrapIOExceptions(
-      body: => Unit): Unit = {
+      body: => Unit
+  ): Unit = {
     if (closed) setError()
     else trapIOExceptions(body)
   }

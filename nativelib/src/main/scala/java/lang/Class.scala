@@ -1,8 +1,10 @@
 package java.lang
 
 import java.lang.reflect.{Field, Method}
+import scala.language.implicitConversions
 
-import scalanative.native._
+import scalanative.annotation._
+import scalanative.unsafe._
 import scalanative.runtime.{Array => _, _}
 
 // These two methods are generated at link-time by the toolchain
@@ -17,155 +19,151 @@ object rtti {
 }
 import rtti._
 
-final class _Class[A](val rawty: RawPtr) {
-  private def ty: Ptr[Type] =
-    fromRawPtr[Type](rawty)
+final class _Class[A] {
+  var id: Int = _
+  var traitId: Int = _
+  var name: String = _
+  var size: Int = _
+  var idRangeUntil: Int = _
 
   def cast(obj: Object): A =
     obj.asInstanceOf[A]
 
   def getComponentType(): _Class[_] = {
-    if (rawty == typeof[BooleanArray]) classOf[scala.Boolean]
-    else if (rawty == typeof[CharArray]) classOf[scala.Char]
-    else if (rawty == typeof[ByteArray]) classOf[scala.Byte]
-    else if (rawty == typeof[ShortArray]) classOf[scala.Short]
-    else if (rawty == typeof[IntArray]) classOf[scala.Int]
-    else if (rawty == typeof[LongArray]) classOf[scala.Long]
-    else if (rawty == typeof[FloatArray]) classOf[scala.Float]
-    else if (rawty == typeof[DoubleArray]) classOf[scala.Double]
+    if (is(classOf[BooleanArray])) classOf[scala.Boolean]
+    else if (is(classOf[CharArray])) classOf[scala.Char]
+    else if (is(classOf[ByteArray])) classOf[scala.Byte]
+    else if (is(classOf[ShortArray])) classOf[scala.Short]
+    else if (is(classOf[IntArray])) classOf[scala.Int]
+    else if (is(classOf[LongArray])) classOf[scala.Long]
+    else if (is(classOf[FloatArray])) classOf[scala.Float]
+    else if (is(classOf[DoubleArray])) classOf[scala.Double]
     else classOf[java.lang.Object]
   }
 
-  def getInterfaces(): Array[_Class[_]] =
-    ???
-
   def getName(): String =
-    ty.name
+    name
 
   def getSimpleName(): String =
-    getName.split('.').last.split('$').last
-
-  def getSuperclass(): Class[_ >: A] =
-    ???
-
-  @stub
-  def getField(name: String): Field =
-    ???
+    getName().split('.').last.split('$').last
 
   def isArray(): scala.Boolean =
-    (rawty == typeof[BooleanArray] ||
-      rawty == typeof[CharArray] ||
-      rawty == typeof[ByteArray] ||
-      rawty == typeof[ShortArray] ||
-      rawty == typeof[IntArray] ||
-      rawty == typeof[LongArray] ||
-      rawty == typeof[FloatArray] ||
-      rawty == typeof[DoubleArray] ||
-      rawty == typeof[ObjectArray])
+    is(classOf[BooleanArray]) ||
+      is(classOf[CharArray]) ||
+      is(classOf[ByteArray]) ||
+      is(classOf[ShortArray]) ||
+      is(classOf[IntArray]) ||
+      is(classOf[LongArray]) ||
+      is(classOf[FloatArray]) ||
+      is(classOf[DoubleArray]) ||
+      is(classOf[ObjectArray])
 
   def isAssignableFrom(that: Class[_]): scala.Boolean =
-    is(that.asInstanceOf[_Class[_]].ty, ty)
+    is(that.asInstanceOf[_Class[_]], this)
 
   def isInstance(obj: Object): scala.Boolean =
-    is(obj.getClass.asInstanceOf[_Class[_]].ty, ty)
+    is(obj.getClass.asInstanceOf[_Class[_]], this)
 
-  private def is(left: Ptr[Type], right: Ptr[Type]): Boolean =
+  @alwaysinline private def is(cls: Class[_]): Boolean =
+    this eq cls.asInstanceOf[_Class[A]]
+
+  private def is(left: _Class[_], right: _Class[_]): Boolean =
     // This replicates the logic of the compiler-generated instance check
     // that you would normally get if you do (obj: L).isInstanceOf[R],
     // where rtti for L and R are `left` and `right`.
-    left.kind match {
-      case CLASS_KIND =>
-        right.kind match {
-          case CLASS_KIND =>
-            val rightCls  = right.asInstanceOf[Ptr[ClassType]]
-            val rightFrom = rightCls.idRangeFrom
-            val rightTo   = rightCls.idRangeTo
-            val leftId    = left.id
-            leftId >= rightFrom && leftId <= rightTo
-          case TRAIT_KIND =>
-            __check_class_has_trait(left.id, right.id)
-          case STRUCT_KIND =>
-            false
-        }
-      case TRAIT_KIND =>
-        right.kind match {
-          case CLASS_KIND =>
-            false
-          case TRAIT_KIND =>
-            __check_trait_has_trait(left.id, right.id)
-          case STRUCT_KIND =>
-            false
-        }
-      case STRUCT_KIND =>
-        right.kind match {
-          case CLASS_KIND =>
-            false
-          case TRAIT_KIND =>
-            false
-          case STRUCT_KIND =>
-            left.id == right.id
-        }
+    if (!left.isInterface()) {
+      if (!right.isInterface()) {
+        val rightFrom = right.id
+        val rightTo = right.idRangeUntil
+        val leftId = left.id
+        leftId >= rightFrom && leftId <= rightTo
+      } else {
+        __check_class_has_trait(left.id, -right.id - 1)
+      }
+    } else {
+      if (!right.isInterface()) {
+        false
+      } else {
+        __check_trait_has_trait(-left.id - 1, -right.id - 1)
+      }
     }
 
   def isInterface(): scala.Boolean =
-    ty.kind == TRAIT_KIND
+    id < 0
 
   def isPrimitive(): scala.Boolean =
-    (rawty == typeof[PrimitiveBoolean] ||
-      rawty == typeof[PrimitiveChar] ||
-      rawty == typeof[PrimitiveByte] ||
-      rawty == typeof[PrimitiveShort] ||
-      rawty == typeof[PrimitiveInt] ||
-      rawty == typeof[PrimitiveLong] ||
-      rawty == typeof[PrimitiveFloat] ||
-      rawty == typeof[PrimitiveDouble] ||
-      rawty == typeof[PrimitiveUnit])
+    is(classOf[PrimitiveBoolean]) ||
+      is(classOf[PrimitiveChar]) ||
+      is(classOf[PrimitiveByte]) ||
+      is(classOf[PrimitiveShort]) ||
+      is(classOf[PrimitiveInt]) ||
+      is(classOf[PrimitiveLong]) ||
+      is(classOf[PrimitiveFloat]) ||
+      is(classOf[PrimitiveDouble]) ||
+      is(classOf[PrimitiveUnit])
 
-  override def equals(other: Any): scala.Boolean =
+  @inline override def equals(other: Any): scala.Boolean =
     other match {
       case other: _Class[_] =>
-        rawty == other.rawty
+        this eq other
       case _ =>
         false
     }
 
-  override def hashCode: Int =
-    Intrinsics.castRawPtrToLong(rawty).##
+  @inline override def hashCode: Int =
+    Intrinsics.castRawPtrToLong(Intrinsics.castObjectToRawPtr(this)).##
 
   override def toString = {
-    val name = getName
-    val prefix = ty.kind match {
-      case CLASS_KIND  => "class "
-      case TRAIT_KIND  => "interface "
-      case STRUCT_KIND => "struct "
-    }
+    val name = getName()
+    val prefix = if (isInterface()) "interface " else "class "
     prefix + name
   }
 
+  @stub
+  def getInterfaces(): Array[_Class[_]] =
+    ???
+  @stub
+  def getSuperclass(): Class[_ >: A] =
+    ???
+  @stub
+  def getField(name: String): Field =
+    ???
   @stub
   def getClassLoader(): java.lang.ClassLoader = ???
   @stub
   def getConstructor(args: Array[Object]): java.lang.reflect.Constructor[_] =
     ???
   @stub
-  def getConstructors(): Array[Object]  = ???
+  def getConstructors(): Array[Object] = ???
+  @stub
   def getDeclaredFields(): Array[Field] = ???
-  def getMethod(name: java.lang.String,
-                args: Array[Class[_]]): java.lang.reflect.Method       = ???
-  def getMethods(): Array[Method]                                      = ???
+  @stub
+  def getMethod(
+      name: java.lang.String,
+      args: Array[Class[_]]
+  ): java.lang.reflect.Method = ???
+  @stub
+  def getMethods(): Array[Method] = ???
+  @stub
   def getResourceAsStream(name: java.lang.String): java.io.InputStream = ???
 }
 
 object _Class {
-  private[java] implicit def _class2class[A](cls: _Class[A]): Class[A] =
+  @alwaysinline private[java] implicit def _class2class[A](
+      cls: _Class[A]
+  ): Class[A] =
     cls.asInstanceOf[Class[A]]
-  private[java] implicit def class2_class[A](cls: Class[A]): _Class[A] =
+  @alwaysinline private[java] implicit def class2_class[A](
+      cls: Class[A]
+  ): _Class[A] =
     cls.asInstanceOf[_Class[A]]
 
   @stub
   def forName(name: String): Class[_] = ???
   @stub
-  def forName(name: String,
-              init: scala.Boolean,
-              loader: ClassLoader): Class[_] = ???
+  def forName(
+      name: String,
+      init: scala.Boolean,
+      loader: ClassLoader
+  ): Class[_] = ???
 }

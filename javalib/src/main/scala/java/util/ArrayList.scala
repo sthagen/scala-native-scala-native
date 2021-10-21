@@ -7,9 +7,10 @@ import java.io.Serializable
 // We use an Array[Any] as an underlying storage and box/unbox AnyVals when needed.
 // inner: The underlying array
 // _size: Keeps the track of the effective size of the underlying array. a.k.a. end index exclusive
-class ArrayList[E] private (private[this] var inner: Array[Any],
-                            private[this] var _size: Int)
-    extends AbstractList[E]
+class ArrayList[E] private (
+    private[this] var inner: Array[Any],
+    private[this] var _size: Int
+) extends AbstractList[E]
     with List[E]
     with RandomAccess
     with Cloneable
@@ -19,13 +20,19 @@ class ArrayList[E] private (private[this] var inner: Array[Any],
       {
         if (initialCapacity < 0) {
           throw new IllegalArgumentException(
-            "Illegal Capacity: " + initialCapacity)
+            "Illegal Capacity: " + initialCapacity
+          )
         }
         val initialArr =
-          Array.ofDim[Any](initialCollection.size() max initialCapacity)
-        import scala.collection.JavaConverters._
-        initialCollection.asScala
-          .copyToArray(initialArr)
+          Array.ofDim[Any](initialCollection.size().max(initialCapacity))
+
+        System.arraycopy(
+          initialCollection.toArray(),
+          0,
+          initialArr,
+          0,
+          initialCollection.size()
+        )
         initialArr
       },
       initialCollection.size()
@@ -76,7 +83,7 @@ class ArrayList[E] private (private[this] var inner: Array[Any],
   override def clone(): AnyRef = new ArrayList(inner, _size)
 
   override def toArray(): Array[AnyRef] =
-    inner.map(_.asInstanceOf[AnyRef])
+    inner.slice(0, _size).map(_.asInstanceOf[AnyRef])
 
   override def toArray[T](a: Array[T]): Array[T] =
     if (a == null)
@@ -143,6 +150,26 @@ class ArrayList[E] private (private[this] var inner: Array[Any],
         remove(idx)
         true
     }
+
+  override def removeRange(fromIndex: Int, toIndex: Int): Unit = {
+
+    // JVM documents fromIndex == toIndex as having 'no effect'
+    if (fromIndex != toIndex) {
+      if ((fromIndex < 0) || (fromIndex >= _size) || (toIndex > size())
+          || (toIndex < fromIndex)) {
+        // N.B.: JVM docs specify IndexOutOfBounds but use de facto.
+        throw new ArrayIndexOutOfBoundsException()
+      } else {
+        val srcIndex = toIndex
+        val dstIndex = fromIndex
+        val tailSize = _size - toIndex
+
+        System.arraycopy(inner, srcIndex, inner, dstIndex, tailSize)
+
+        _size -= (toIndex - fromIndex)
+      }
+    }
+  }
 
   override def clear(): Unit = {
     // fill the content of inner by null so that the elements can be garbage collected

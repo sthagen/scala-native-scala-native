@@ -1,55 +1,35 @@
 package scala.scalanative
 
-import scala.reflect.ClassTag
-import scalanative.native._
+import scalanative.annotation.alwaysinline
+import scalanative.unsafe._
 import scalanative.runtime.Intrinsics._
-import scalanative.runtime.LLVMIntrinsics._
 
 package object runtime {
 
-  /** Runtime Type Information. */
-  type Type = CStruct3[Int, String, Byte]
-
-  implicit class TypeOps(val self: Ptr[Type]) extends AnyVal {
-    def id: Int      = !(self._1)
-    def name: String = !(self._2)
-    def kind: Long   = !(self._3)
+  @deprecated("Internal API, deprecated for removal", "0.4.1")
+  def toClass(rtti: RawPtr): _Class[_] = {
+    castRawPtrToObject(rtti).getClass().asInstanceOf[_Class[_]]
   }
 
-  /** Class runtime type information. */
-  type ClassType = CStruct3[Type, Long, CStruct2[Int, Int]]
-
-  implicit class ClassTypeOps(val self: Ptr[ClassType]) extends AnyVal {
-    def id: Int           = self._1.id
-    def name: String      = self._1.name
-    def kind: Long        = self._1.kind
-    def size: Long        = !(self._2)
-    def idRangeFrom: Long = !(self._3._1)
-    def idRangeTo: Long   = !(self._3._2)
+  @deprecated("Internal API, deprecated for removal", "0.4.1")
+  @alwaysinline def toRawType(cls: Class[_]): RawPtr = {
+    castObjectToRawPtr(cls)
   }
 
-  final val CLASS_KIND  = 0
-  final val TRAIT_KIND  = 1
-  final val STRUCT_KIND = 2
+  /** Read type information of given object. */
+  @deprecated("Internal API, deprecated for removal", "0.4.1")
+  @alwaysinline def getRawType(obj: Object): RawPtr = {
+    Intrinsics.castObjectToRawPtr(obj.getClass())
+  }
 
   /** Used as a stub right hand of intrinsified methods. */
   def intrinsic: Nothing = throwUndefined()
 
-  /** Returns info pointer for given type. */
-  def typeof[T](implicit ct: scala.reflect.ClassTag[T]): RawPtr =
-    ct.runtimeClass.asInstanceOf[java.lang._Class[_]].rawty
-
-  /** Read type information of given object. */
-  def getType(obj: Object): RawPtr = {
-    val rawptr = Intrinsics.castObjectToRawPtr(obj)
-    Intrinsics.loadRawPtr(rawptr)
-  }
-
   /** Get monitor for given object. */
-  def getMonitor(obj: Object): Monitor = Monitor.dummy
+  @alwaysinline def getMonitor(obj: Object): Monitor = Monitor.dummy
 
-  /** Initialize runtime with given arguments and return the
-   *  rest as Java-style array.
+  /** Initialize runtime with given arguments and return the rest as Java-style
+   *  array.
    */
   def init(argc: Int, rawargv: RawPtr): scala.Array[String] = {
     val argv = fromRawPtr[CString](rawargv)
@@ -66,16 +46,16 @@ package object runtime {
     args
   }
 
-  def fromRawPtr[T](rawptr: RawPtr): Ptr[T] =
-    rawptr.cast[Ptr[T]]
+  @alwaysinline def fromRawPtr[T](rawptr: RawPtr): Ptr[T] =
+    Boxes.boxToPtr(rawptr)
 
-  def toRawPtr[T](ptr: Ptr[T]): RawPtr =
-    ptr.cast[RawPtr]
+  @alwaysinline def toRawPtr[T](ptr: Ptr[T]): RawPtr =
+    Boxes.unboxToPtr(ptr)
 
-  /** Run the runtime's event loop. The method is called from the
-   *  generated C-style after the application's main method terminates.
+  /** Run the runtime's event loop. The method is called from the generated
+   *  C-style after the application's main method terminates.
    */
-  def loop(): Unit =
+  @noinline def loop(): Unit =
     ExecutionContext.loop()
 
   /** Called by the generated code in case of division by zero. */
@@ -84,10 +64,11 @@ package object runtime {
 
   /** Called by the generated code in case of incorrect class cast. */
   @noinline def throwClassCast(from: RawPtr, to: RawPtr): Nothing = {
-    val fromName = loadObject(elemRawPtr(from, 8))
-    val toName   = loadObject(elemRawPtr(to, 8))
+    val fromName = loadObject(elemRawPtr(from, 16))
+    val toName = loadObject(elemRawPtr(to, 16))
     throw new java.lang.ClassCastException(
-      s"$fromName cannot be cast to $toName")
+      s"$fromName cannot be cast to $toName"
+    )
   }
 
   /** Called by the generated code in case of operations on null. */
@@ -97,4 +78,13 @@ package object runtime {
   /** Called by the generated code in case of unexpected condition. */
   @noinline def throwUndefined(): Nothing =
     throw new UndefinedBehaviorError
+
+  /** Called by the generated code in case of out of bounds on array access. */
+  @noinline def throwOutOfBounds(i: Int): Nothing =
+    throw new ArrayIndexOutOfBoundsException(i.toString)
+
+  /** Called by the generated code in case of missing method on reflective call.
+   */
+  @noinline def throwNoSuchMethod(sig: String): Nothing =
+    throw new NoSuchMethodException(sig)
 }
