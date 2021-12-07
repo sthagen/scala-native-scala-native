@@ -40,6 +40,7 @@ object BinaryIncompatibilities {
     exclude[DirectMissingMethodProblem]("scala.scalanative.regex.*"),
     exclude[DirectMissingMethodProblem]("java.lang._Class.rawty"),
     exclude[DirectMissingMethodProblem]("java.lang._Class.this"),
+    exclude[MissingClassProblem]("scala.scalanative.unsafe.Zone$ZoneImpl*"),
     // moved to auxlib
     exclude[MissingClassProblem]("scala.runtime.BoxesRunTime*"),
     // moved to javalib
@@ -47,7 +48,9 @@ object BinaryIncompatibilities {
     // package-private
     exclude[MissingClassProblem]("scala.scalanative.runtime.*Shutdown*"),
     exclude[Problem]("scala.scalanative.runtime.ClassInstancesRegistry*"),
-    exclude[Problem]("scala.scalanative.runtime.package*TypeOps*")
+    exclude[Problem]("scala.scalanative.runtime.package*TypeOps*"),
+    // Stub with incorrect signature
+    exclude[Problem]("java.lang._Class.getConstructor")
   )
   final val CLib: Filters = Nil
   final val PosixLib: Filters = Seq(
