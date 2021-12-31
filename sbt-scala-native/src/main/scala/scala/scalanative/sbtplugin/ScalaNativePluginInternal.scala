@@ -31,9 +31,14 @@ object ScalaNativePluginInternal {
       "org.scala-native" %%% "nativelib" % nativeVersion,
       "org.scala-native" %%% "javalib" % nativeVersion,
       "org.scala-native" %%% "auxlib" % nativeVersion,
-      "org.scala-native" %%% "scalalib" % nativeVersion,
       "org.scala-native" %%% "test-interface" % nativeVersion % Test
     ),
+    libraryDependencies += CrossVersion
+      .partialVersion(scalaVersion.value)
+      .fold(throw new RuntimeException("Unsupported Scala Version")) {
+        case (2, _) => "org.scala-native" %%% "scalalib" % nativeVersion
+        case (3, _) => "org.scala-native" %%% "scala3lib" % nativeVersion
+      },
     addCompilerPlugin(
       "org.scala-native" % "nscplugin" % nativeVersion cross CrossVersion.full
     )
@@ -118,13 +123,12 @@ object ScalaNativePluginInternal {
           throw new MessageOnlyException("No main class detected.")
         }
 
-        val maincls = mainClass + "$"
         val cwd = nativeWorkdir.value.toPath
 
         val logger = streams.value.log.toLogger
         build.Config.empty
           .withLogger(logger)
-          .withMainClass(maincls)
+          .withMainClass(mainClass)
           .withClassPath(classpath)
           .withWorkdir(cwd)
           .withCompilerConfig(nativeConfig.value)

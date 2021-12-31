@@ -42,6 +42,7 @@ class WindowsPath private[windows] (
         }
       case (PathType.Absolute, Some(root))          => root
       case (PathType.DirectoryRelative, Some(root)) => root + "\\"
+      case (PathType.DriveRelative, _)              => "\\"
       case _                                        => ""
     }
     drivePrefix + segments.mkString(seperator)
@@ -95,7 +96,7 @@ class WindowsPath private[windows] (
     new WindowsPath(segments.slice(beginIndex, endIndex))
 
   override def startsWith(other: Path): Boolean =
-    if (fs.provider == other.getFileSystem().provider()) {
+    if (fs.provider() == other.getFileSystem().provider()) {
       val otherLength = other.getNameCount()
       val thisLength = getNameCount()
 
@@ -112,7 +113,7 @@ class WindowsPath private[windows] (
     startsWith(WindowsPathParser(other))
 
   override def endsWith(other: Path): Boolean =
-    if (fs.provider == other.getFileSystem().provider()) {
+    if (fs.provider() == other.getFileSystem().provider()) {
       val otherLength = other.getNameCount()
       val thisLength = getNameCount()
       if (otherLength > thisLength) false
@@ -223,7 +224,7 @@ class WindowsPath private[windows] (
     }
 
   override def compareTo(other: Path): Int =
-    if (fs.provider == other.getFileSystem().provider()) {
+    if (fs.provider() == other.getFileSystem().provider()) {
       this.toString().compareTo(other.toString)
     } else {
       throw new ClassCastException()

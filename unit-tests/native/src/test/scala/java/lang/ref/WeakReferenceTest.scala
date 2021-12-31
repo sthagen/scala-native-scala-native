@@ -33,6 +33,28 @@ class WeakReferenceTest {
   }
 
   @nooptimize @Test def addsToReferenceQueueAfterGC(): Unit = {
+    def assertEventuallyIsCollected(
+        clue: String,
+        ref: WeakReference[_],
+        retries: Int
+    ): Unit = {
+      ref.get() match {
+        case null =>
+          assertTrue("collected but not enqueded", ref.isEnqueued())
+        case v =>
+          if (retries > 0) {
+            // Give GC something to collect
+            System.err.println(s"$clue - not yet collected $ref ($retries)")
+            GC.collect()
+            assertEventuallyIsCollected(clue, ref, retries - 1)
+          } else {
+            fail(
+              s"$clue - expected that WeakReference would be collected, but it contains value ${v}"
+            )
+          }
+      }
+    }
+
     gcAssumption()
     val refQueue = new ReferenceQueue[A]()
     val weakRef1 = allocWeakRef(refQueue)
@@ -40,15 +62,19 @@ class WeakReferenceTest {
     val weakRefList = List(weakRef1, weakRef2)
 
     GC.collect()
+    assertEventuallyIsCollected("weakRef1", weakRef1, retries = 3)
+    assertEventuallyIsCollected("weakRef2", weakRef2, retries = 3)
 
-    assertEquals(weakRef1.get(), null)
-    assertEquals(weakRef2.get(), null)
+    assertEquals("weakRef1", null, weakRef1.get())
+    assertEquals("weakRef2", null, weakRef2.get())
     val a = refQueue.poll()
+    assertNotNull("a was null", a)
     val b = refQueue.poll()
-    assertTrue(weakRefList.contains(a))
-    assertTrue(weakRefList.contains(b))
+    assertNotNull("b was null", b)
+    assertTrue("!contains a", weakRefList.contains(a))
+    assertTrue("!contains b", weakRefList.contains(b))
     assertNotEquals(a, b)
-    assertEquals(refQueue.poll(), null)
+    assertEquals("pool not null", null, refQueue.poll())
   }
 
   @Test def clear(): Unit = {

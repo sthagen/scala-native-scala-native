@@ -92,7 +92,7 @@ final class WindowsDosFileAttributeView(path: Path, options: Array[LinkOption])
       access = FILE_GENERIC_WRITE,
       attributes = fileOpeningFlags
     ) { handle =>
-      val create, access, write = stackalloc[WinFileTime]
+      val create, access, write = stackalloc[WinFileTime]()
       if (!SetFileTime(
             handle,
             creationTime = setOrNull(create, createTime),
@@ -107,7 +107,7 @@ final class WindowsDosFileAttributeView(path: Path, options: Array[LinkOption])
   def readAttributes(): DosFileAttributes = attributes
 
   private lazy val attributes: DosFileAttributes = Zone { implicit z: Zone =>
-    val fileInfo = alloc[ByHandleFileInformation]
+    val fileInfo = alloc[ByHandleFileInformation]()
 
     withFileOpen(
       pathAbs,

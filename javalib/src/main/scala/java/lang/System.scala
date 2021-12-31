@@ -63,7 +63,7 @@ object System {
       sysProps.setProperty("path.separator", ";")
       sysProps.setProperty(
         "java.io.tmpdir", {
-          val buffer = stackalloc[scala.Byte](MAX_PATH)
+          val buffer: Ptr[scala.Byte] = stackalloc[scala.Byte](MAX_PATH)
           GetTempPathA(MAX_PATH, buffer)
           fromCString(buffer)
         }
@@ -128,12 +128,12 @@ object System {
   private def getCurrentDirectory(): Option[String] = {
     val bufSize = 1024.toUInt
     if (isWindows) {
-      val buf = stackalloc[CChar16](bufSize)
+      val buf: Ptr[CChar16] = stackalloc[CChar16](bufSize)
       if (GetCurrentDirectoryW(bufSize, buf) != 0.toUInt)
         Some(fromCWideString(buf, StandardCharsets.UTF_16LE))
       else None
     } else {
-      val buf = stackalloc[scala.Byte](bufSize)
+      val buf: Ptr[scala.Byte] = stackalloc[scala.Byte](bufSize)
       val cwd = unistd.getcwd(buf, bufSize)
       Option(cwd).map(fromCString(_))
     }
@@ -142,15 +142,15 @@ object System {
   private def getUserHomeDirectory(): Option[String] = {
     if (isWindows) {
       WindowsHelperMethods.withUserToken(AccessToken.TOKEN_QUERY) { token =>
-        val bufSize = stackalloc[UInt]
+        val bufSize = stackalloc[UInt]()
         !bufSize = 256.toUInt
-        val buf = stackalloc[CChar16](!bufSize)
+        val buf: Ptr[CChar16] = stackalloc[CChar16](!bufSize)
         if (GetUserProfileDirectoryW(token, buf, bufSize))
           Some(fromCWideString(buf, StandardCharsets.UTF_16LE))
         else None
       }
     } else {
-      val buf = stackalloc[pwd.passwd]
+      val buf = stackalloc[pwd.passwd]()
       val uid = unistd.getuid()
       val res = pwd.getpwuid(uid, buf)
       if (res == 0 && buf.pw_dir != null)
@@ -163,7 +163,7 @@ object System {
       infoCode: LCType,
       bufSize: UInt
   ): Option[String] = {
-    val buf = stackalloc[CChar16](bufSize)
+    val buf: Ptr[CChar16] = stackalloc[CChar16](bufSize)
     GetLocaleInfoEx(
       LOCALE_NAME_USER_DEFAULT,
       infoCode,
