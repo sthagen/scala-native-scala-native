@@ -45,10 +45,12 @@ trait NirGenExpr(using Context) {
     buf =>
     def genExpr(tree: Tree): Val = {
       tree match {
-        case EmptyTree            => Val.Unit
-        case ValTree(value)       => value
-        case ContTree(f)          => f()
-        case tree: Apply          => genApply(tree)
+        case EmptyTree      => Val.Unit
+        case ValTree(value) => value
+        case ContTree(f)    => f()
+        case tree: Apply =>
+          val updatedTree = lazyValsAdapter.transformApply(tree)
+          genApply(updatedTree)
         case tree: Assign         => genAssign(tree)
         case tree: Block          => genBlock(tree)
         case tree: Closure        => genClosure(tree)
@@ -1153,8 +1155,6 @@ trait NirGenExpr(using Context) {
       assert(!sym.isStaticMethod, sym)
       val owner = sym.owner.asClass
       val name = genMethodName(sym)
-      val curThis = curMethodThis.get
-      val outerSym = curMethodOuterSym.get
 
       val origSig = genMethodSig(sym)
       val sig =
@@ -1162,30 +1162,15 @@ trait NirGenExpr(using Context) {
         else origSig
       val args = genMethodArgs(sym, argsp)
 
-      // In case if static method is defined in outer class, use it's accessor to resolve
-      // instance of expected type
-      def outerSymResult = outerSym.map(_.info.resultType.typeSymbol)
-      lazy val outerAccessor = transform.ExplicitOuter
-        .outerAccessor(curClassSym.get)
-        .filter(_.info.resultType.typeSymbol == owner)
-
-      val selfVal =
-        if (curClassSym.get.isSubClass(owner)) self
-        else if (outerSymResult.exists(_.isSubClass(owner)))
-          curMethodEnv.resolve(outerSym.get)
-        else if (outerAccessor.exists && curThis.isDefined)
-          genApplyMethod(outerAccessor, false, curThis.get, Nil)
-        else self
-
       val isStaticCall = statically || owner.isStruct || sym.isExtern
       val method =
         if (isStaticCall) Val.Global(name, nir.Type.Ptr)
         else
           val Global.Member(_, sig) = name
-          buf.method(selfVal, sig, unwind)
+          buf.method(self, sig, unwind)
       val values =
         if (sym.isExtern) args
-        else selfVal +: args
+        else self +: args
 
       val res = buf.call(sig, method, values, unwind)
 
@@ -2260,6 +2245,13 @@ trait NirGenExpr(using Context) {
             paramTypes
           )
           fnRef
+
+        case ref: RefTree =>
+          report.error(
+            s"Function passed to ${app.symbol.show} needs to be inlined",
+            tree.sourcePos
+          )
+          Val.Null
 
         case _ =>
           report.error(
