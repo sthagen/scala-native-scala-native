@@ -521,7 +521,7 @@ Here is the list of currently available classes:
 
 **Note:** This is an ongoing effort, some of the classes listed here might
 be partially implemented. Please consult `javalib sources
-<https://github.com/scala-native/scala-native/tree/master/javalib/src/main/scala/java>`_
+<https://github.com/scala-native/scala-native/tree/main/javalib/src/main/scala/java>`_
 for details.
 
 Regular expressions (java.util.regex)
