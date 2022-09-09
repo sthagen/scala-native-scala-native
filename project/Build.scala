@@ -30,6 +30,7 @@ object Build {
           val allProjects: Seq[Project] = Seq(
               sbtScalaNative
             ) ++ Seq(
+                nir, util, tools,
                 nscPlugin, junitPlugin,
                 nativelib, clib, posixlib, windowslib,
                 auxlib, javalib, javalibExtDummies, scalalib,
@@ -226,7 +227,7 @@ object Build {
   lazy val posixlib = MultiScalaProject("posixlib")
     .enablePlugins(MyScalaNativePlugin)
     .settings(mavenPublishSettings)
-    .dependsOn(nativelib)
+    .dependsOn(nativelib, clib)
     .withNativeCompilerPlugin
 
   lazy val windowslib =
@@ -262,9 +263,12 @@ object Build {
       .settings(mavenPublishSettings, disabledDocsSettings)
       .withNativeCompilerPlugin
       .mapBinaryVersions {
-        case "2.11" | "2.12" | "2.13" =>
+        case version @ ("2.11" | "2.12" | "2.13") =>
           _.settings(
-            commonScalalibSettings("scala-library"),
+            commonScalalibSettings(
+              "scala-library",
+              MultiScalaProject.scalaVersions(version)
+            ),
             scalacOptions ++= Seq(
               "-deprecation:false",
               "-language:postfixOps",
@@ -289,7 +293,7 @@ object Build {
         case "3" =>
           _.settings(
             name := "scala3lib",
-            commonScalalibSettings("scala3-library_3"),
+            commonScalalibSettings("scala3-library_3", scala3libSourcesVersion),
             scalacOptions ++= Seq(
               "-language:implicitConversions"
             ),

@@ -51,7 +51,7 @@ private[scalanative] object Filter {
       def include(path: String) = {
         if (path.contains(optPath)) {
           val name = Paths.get(path).toFile.getName.split("\\.").head
-          linkerResult.links.map(_.name).contains(name)
+          linkerResult.links.exists(_.name == name)
         } else if (path.contains(gcPath)) {
           gcSelectedPaths.exists(path.contains)
         } else {
@@ -59,15 +59,10 @@ private[scalanative] object Filter {
         }
       }
 
-      val (includePaths, excludePaths) = allPaths.map(_.abs).partition(include)
+      // All the .o files are kept but we pass on the
+      // included files to the link phase
+      val includePaths = allPaths.map(_.abs).filter(include)
 
-      // delete .o files for all excluded source files
-      // avoids deleting .o files except when changing
-      // optional or garbage collectors
-      excludePaths.foreach { path =>
-        val opath = Paths.get(path + oExt)
-        Files.deleteIfExists(opath)
-      }
       val projectConfig = config.withCompilerConfig(
         _.withCompileOptions(
           config.compileOptions ++ gcIncludePaths.map("-I" + _)
