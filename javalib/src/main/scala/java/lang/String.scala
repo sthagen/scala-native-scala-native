@@ -111,7 +111,16 @@ final class _String()
   def this(data: Array[Char]) =
     this(data, 0, data.length)
 
-  def this(start: Int, length: Int, data: Array[Char]) = {
+  /* Note Well:
+   *   This constructor creates a MUTABLE String. That violates
+   *   the immutable JVM specification, but is useful strictly within the
+   *   confines of "java[lang]".
+   *
+   *   Any code with access to the "data" Array can change the content and
+   *   that change will also be in a String created with this constructor.
+   *   Use with knowledge, wisdom, and discretion.
+   */
+  private[lang] def this(start: Int, length: Int, data: Array[Char]) = {
     this()
     value = data
     offset = start
@@ -127,9 +136,9 @@ final class _String()
 
   def this(sb: StringBuffer) = {
     this()
-    offset = 0
-    value = sb.getValue()
     count = sb.length()
+    value = new Array[Char](count)
+    sb.getChars(0, count, value, 0)
   }
 
   def this(codePoints: Array[Int], offset: Int, count: Int) = {
@@ -153,7 +162,6 @@ final class _String()
 
   def this(sb: java.lang.StringBuilder) = {
     this()
-    offset = 0
     count = sb.length()
     value = new Array[Char](count)
     sb.getChars(0, count, value, 0)
@@ -1517,10 +1525,9 @@ for (cp <- 0 to Character.MAX_CODE_POINT) {
     result.toString()
   }
 
+  // Java 15 and above.
   def transform[R](f: java.util.function.Function[String, R]): R =
     f.apply(thisString)
-
-  def getValue(): Array[Char] = value
 }
 
 object _String {
