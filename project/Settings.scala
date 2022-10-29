@@ -3,6 +3,7 @@ package build
 import sbt._
 import sbt.Keys._
 import sbt.nio.Keys.fileTreeView
+import com.typesafe.tools.mima.core._
 import com.typesafe.tools.mima.plugin.MimaPlugin.autoImport._
 import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport._
 import org.portablescala.sbtplatformdeps.PlatformDepsPlugin.autoImport._
@@ -690,11 +691,11 @@ object Settings {
               copy(scalaSourcePath, outputFile)
               Some(outputFile)
             } catch {
-              case _: Exception =>
+              case ex: Exception =>
                 // Postpone failing to check which other patches do not apply
                 failedToApplyPatches = true
                 val path = sourcePath.toFile.relativeTo(srcDir.getParentFile)
-                s.log.error(s"Cannot apply patch for $path")
+                s.log.error(s"Cannot apply patch for $path - $ex")
                 None
             } finally {
               if (scalaSourceCopyPath.exists()) {
