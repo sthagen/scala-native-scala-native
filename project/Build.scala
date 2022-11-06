@@ -10,6 +10,7 @@ import sbtbuildinfo.BuildInfoPlugin
 
 import org.portablescala.sbtplatformdeps.PlatformDepsPlugin.autoImport._
 import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport._
+import com.jsuereth.sbtpgp.PgpKeys.publishSigned
 import scala.scalanative.build._
 import ScriptedPlugin.autoImport._
 
@@ -17,6 +18,65 @@ object Build {
   import ScalaVersions._
   import Settings._
   import Deps._
+
+// format: off
+  lazy val compilerPlugins =  List(nscPlugin, junitPlugin)
+  lazy val publishedMultiScalaProjects = compilerPlugins ++ List(
+    nir, util, tools,
+    nativelib, clib, posixlib, windowslib,
+    auxlib, javalib, scalalib,
+    testInterface, testInterfaceSbtDefs, testRunner,
+    junitRuntime
+  )
+  lazy val testMultiScalaProjects = List(
+      javalibExtDummies,
+      testingCompiler, testingCompilerInterface,
+      junitAsyncNative, junitAsyncJVM,
+      junitTestOutputsJVM, junitTestOutputsNative,
+      tests, testsJVM, testsExt, testsExtJVM, sandbox,
+      scalaPartest, scalaPartestRuntime,
+      scalaPartestTests, scalaPartestJunitTests
+    )
+// format: on
+  lazy val allMultiScalaProjects =
+    publishedMultiScalaProjects ::: testMultiScalaProjects
+
+  lazy val publishedProjects =
+    sbtScalaNative :: publishedMultiScalaProjects.flatMap(_.componentProjects)
+  lazy val testProjects = testMultiScalaProjects.flatMap(_.componentProjects)
+  lazy val allProjects = publishedProjects ::: testProjects
+
+  private def setDepenency[T](key: TaskKey[T], projects: Seq[Project]) = {
+    key := key.dependsOn(projects.map(_ / key): _*).value
+  }
+
+  private def setDepenencyForCurrentBinVersion[T](
+      key: TaskKey[T],
+      projects: Seq[MultiScalaProject],
+      includeSbtPlugin: Boolean = true
+  ) = {
+    key := Def.taskDyn {
+      val binVersion = scalaBinaryVersion.value
+      val optSbtPlugin = Seq(sbtScalaNative).filter(_ =>
+        includeSbtPlugin && binVersion == "2.12"
+      )
+      val dependenices =
+        optSbtPlugin ++ projects.map(_.forBinaryVersion(binVersion))
+      val prev = key.value
+      Def
+        .task { prev }
+        .dependsOn(dependenices.map(_ / key): _*)
+    }.value
+  }
+
+  val crossPublish =
+    taskKey[Unit](
+      "Cross publish compiler plugin project without signing and excluding currently used version"
+    )
+  val crossPublishSigned =
+    taskKey[Unit](
+      "Cross publish signed compiler plugin project excluding currently used version"
+    )
 
   lazy val root: Project =
     Project(id = "scala-native", base = file("."))
@@ -26,35 +86,23 @@ object Build {
         crossScalaVersions := ScalaVersions.libCrossScalaVersions,
         commonSettings,
         noPublishSettings,
-        disabledTestsSettings, {
-// format: off
-          val allProjects: Seq[Project] = Seq(
-              sbtScalaNative
-            ) ++ Seq(
-                nir, util, tools,
-                nscPlugin, junitPlugin,
-                nativelib, clib, posixlib, windowslib,
-                auxlib, javalib, javalibExtDummies, scalalib,
-                testInterface, testInterfaceSbtDefs,
-                testingCompiler, testingCompilerInterface,
-                junitRuntime, junitAsyncNative, junitAsyncJVM,
-                junitTestOutputsJVM, junitTestOutputsNative,
-                tests, testsJVM, testsExt, testsExtJVM, sandbox,
-                scalaPartest, scalaPartestRuntime,
-                scalaPartestTests, scalaPartestJunitTests
-            ).flatMap(_.componentProjects)
-// format: on
-          val keys = Seq[TaskKey[_]](clean)
-          for (key <- keys) yield {
-            /* The match is only used to capture the type parameter `a` of
-             * each individual TaskKey.
-             */
-            key match {
-              case key: TaskKey[a] =>
-                key := key.dependsOn(allProjects.map(_ / key): _*).value
-            }
-          }
-        }
+        disabledTestsSettings,
+        setDepenency(clean, allProjects),
+        Seq(Compile / compile, Test / compile).map(
+          setDepenencyForCurrentBinVersion(_, allMultiScalaProjects)
+        ),
+        crossPublish := {},
+        crossPublishSigned := {},
+        Seq(publish, publishSigned, publishLocal).map(
+          setDepenencyForCurrentBinVersion(_, publishedMultiScalaProjects)
+        ),
+        Seq(crossPublish, crossPublishSigned).map(
+          setDepenencyForCurrentBinVersion(
+            _,
+            compilerPlugins,
+            includeSbtPlugin = false
+          )
+        )
       )
 
   // Compiler plugins
@@ -87,25 +135,21 @@ object Build {
     .settings(
       libraryDependencies ++= Deps.Tools(scalaVersion.value),
       Test / fork := true,
-      scalacOptions := {
-        val prev = scalacOptions.value
+      scalacOptions ++= {
+        val scala213StdLibDeprecations = Seq(
+          // In 2.13 lineStream_! was replaced with lazyList_!.
+          "method lineStream_!",
+          // OpenHashMap is used with value class parameter type, we cannot replace it with AnyRefMap or LongMap
+          // Should not be replaced with HashMap due to performance reasons.
+          "class|object OpenHashMap",
+          "class Stream"
+        ).map(msg => s"-Wconf:cat=deprecation&msg=$msg:s")
         CrossVersion
           .partialVersion(scalaVersion.value)
-          .fold(prev) {
-            case (2, 11 | 12) => prev
-            case (2, 13)      =>
-              // 2.13 and 2.11 tools are only used in partest.
-              // It looks like it's impossible to provide alternative sources - it fails to compile plugin sources,
-              // before attaching them to other build projects. We disable unsolvable fatal-warnings with filters below
-              prev ++ Seq(
-                // In 2.13 lineStream_! was replaced with lazyList_!.
-                "-Wconf:cat=deprecation&msg=lineStream_!:s",
-                // OpenHashMap is used with value class parameter type, we cannot replace it with AnyRefMap or LongMap
-                // Should not be replaced with HashMap due to performance reasons.
-                "-Wconf:cat=deprecation&msg=OpenHashMap:s"
-              )
-            case _ =>
-              prev.diff(Seq("-Xfatal-warnings"))
+          .fold(Seq.empty[String]) {
+            case (2, 11 | 12) => Nil
+            case (2, 13)      => scala213StdLibDeprecations
+            case (3, _)       => scala213StdLibDeprecations
           }
       },
       // Running tests in parallel results in `FileSystemAlreadyExistsException`
