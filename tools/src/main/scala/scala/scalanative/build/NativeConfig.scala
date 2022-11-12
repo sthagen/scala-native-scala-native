@@ -13,6 +13,9 @@ sealed trait NativeConfig {
   /** Compilation mode. */
   def mode: Mode
 
+  /** Build target for current compilation */
+  def buildTarget: BuildTarget
+
   /** The path to the `clang` executable. */
   def clang: Path
 
@@ -55,6 +58,9 @@ sealed trait NativeConfig {
 
   /** Map of user defined properties resolved at linktime */
   def linktimeProperties: NativeConfig.LinktimeProperites
+
+  /** Configuration when doing optimization */
+  def optimizerConfig: OptimizerConfig
 
   private lazy val detectedTriple = Discover.targetTriple(clang)
 
@@ -111,6 +117,9 @@ sealed trait NativeConfig {
   /** Create a new config with given compilation options. */
   def withCompileOptions(value: Seq[String]): NativeConfig
 
+  /** Create a new config with given build target */
+  def withBuildTarget(target: BuildTarget): NativeConfig
+
   /** Create a new config given a target triple. */
   def withTargetTriple(value: Option[String]): NativeConfig
 
@@ -150,6 +159,10 @@ sealed trait NativeConfig {
 
   /** Create a new config with given base artifact name. */
   def withBasename(value: String): NativeConfig
+
+  /** Create a optimization configuration */
+  def withOptimizerConfig(value: OptimizerConfig): NativeConfig
+
 }
 
 object NativeConfig {
@@ -166,6 +179,7 @@ object NativeConfig {
       gc = GC.default,
       lto = LTO.default,
       mode = Mode.default,
+      buildTarget = BuildTarget.default,
       check = false,
       checkFatalWarnings = false,
       dump = false,
@@ -175,7 +189,8 @@ object NativeConfig {
       useIncrementalCompilation = true,
       linktimeProperties = Map.empty,
       embedResources = false,
-      basename = ""
+      basename = "",
+      optimizerConfig = OptimizerConfig.empty
     )
 
   private final case class Impl(
@@ -186,6 +201,7 @@ object NativeConfig {
       targetTriple: Option[String],
       gc: GC,
       mode: Mode,
+      buildTarget: BuildTarget,
       lto: LTO,
       linkStubs: Boolean,
       check: Boolean,
@@ -196,7 +212,8 @@ object NativeConfig {
       useIncrementalCompilation: Boolean,
       linktimeProperties: LinktimeProperites,
       embedResources: Boolean,
-      basename: String
+      basename: String,
+      optimizerConfig: OptimizerConfig
   ) extends NativeConfig {
 
     def withClang(value: Path): NativeConfig =
@@ -217,6 +234,9 @@ object NativeConfig {
     def withTargetTriple(value: String): NativeConfig = {
       withTargetTriple(Some(value))
     }
+
+    def withBuildTarget(target: BuildTarget): NativeConfig =
+      copy(buildTarget = target)
 
     def withGC(value: GC): NativeConfig =
       copy(gc = value)
@@ -261,6 +281,10 @@ object NativeConfig {
       copy(basename = value)
     }
 
+    override def withOptimizerConfig(value: OptimizerConfig): NativeConfig = {
+      copy(optimizerConfig = value)
+    }
+
     override def toString: String = {
       val listLinktimeProperties = {
         if (linktimeProperties.isEmpty) ""
@@ -282,6 +306,7 @@ object NativeConfig {
         | - linkingOptions:         $linkingOptions
         | - compileOptions:         $compileOptions
         | - targetTriple:           $targetTriple
+        | - buildTarget             $buildTarget
         | - GC:                     $gc
         | - mode:                   $mode
         | - LTO:                    $lto
@@ -294,6 +319,7 @@ object NativeConfig {
         | - linktimeProperties:     $listLinktimeProperties
         | - embedResources:         $embedResources
         | - incrementalCompilation: $useIncrementalCompilation
+        | - optimizerConfig:        ${optimizerConfig.show(" " * 3)}
         | - basename:               $basename
         |)""".stripMargin
     }
