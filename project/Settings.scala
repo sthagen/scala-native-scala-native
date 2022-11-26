@@ -377,13 +377,15 @@ object Settings {
       // baseDirectory = project/{native,jvm}/.{binVersion}
       val testsRootDir = baseDirectory.value.getParentFile.getParentFile
       val sharedTestsDir = testsRootDir / "shared/src/test"
-      def sources2_13OrAbove = sharedTestsDir / "scala-2.13+"
-      def sources3_2 = sharedTestsDir / "scala-3.2"
+      val `sources 2.12+` = Seq(sharedTestsDir / "scala-2.12+")
+      val `sources 2.13+` = `sources 2.12+` :+ sharedTestsDir / "scala-2.13+"
+      val `sources 3.2+` = `sources 2.13+` :+ sharedTestsDir / "scala-3.2"
       val extraSharedDirectories =
-        scalaVersionsDependendent(scalaVersion.value)(List.empty[File]) {
-          case (2, 13) => sources2_13OrAbove :: Nil
-          case (3, 1)  => sources2_13OrAbove :: Nil
-          case (3, _)  => sources2_13OrAbove :: sources3_2 :: Nil
+        scalaVersionsDependendent(scalaVersion.value)(Seq.empty[File]) {
+          case (2, 12) => `sources 2.12+`
+          case (2, 13) => `sources 2.13+`
+          case (3, 1)  => `sources 2.13+`
+          case (3, _)  => `sources 3.2+`
         }
       val sharedScalaSources =
         scalaVersionDirectories(sharedTestsDir, "scala", scalaVersion.value)
@@ -494,7 +496,6 @@ object Settings {
       scriptedLaunchOpts.value ++
         Seq(
           "-Xmx1024M",
-          "-XX:MaxMetaspaceSize=256M",
           "-Dplugin.version=" + version.value,
           // Default scala.version, can be overriden in test-scrippted command
           "-Dscala.version=" + ScalaVersions.scala212,
@@ -513,7 +514,8 @@ object Settings {
 
   lazy val toolSettings: Seq[Setting[_]] =
     Def.settings(
-      javacOptions ++= Seq("-encoding", "utf8")
+      javacOptions ++= Seq("-encoding", "utf8"),
+      ensureSAMSupportSetting
     )
 
   lazy val recompileAllOrNothingSettings = Def.settings(
