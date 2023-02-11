@@ -1051,11 +1051,9 @@ trait NirGenExpr(using Context) {
 
       val funSym = fun.symbol
       val value = genExpr(receiverp)
-      def boxed = boxValue(receiverp.tpe, value)(using receiverp.span)
-
       if (funSym == defn.Object_synchronized)
         assert(argsp.size == 1, "synchronized with wrong number of args")
-        genSynchronized(ValTree(boxed), argsp.head)
+        genSynchronized(receiverp, argsp.head)
       else genTypeApply(tApply)
     }
 
@@ -1588,27 +1586,46 @@ trait NirGenExpr(using Context) {
     def genSynchronized(
         receiverp: Tree
     )(bodyGen: ExprBuffer => Val)(using nir.Position): Val = {
-      val monitor =
-        genApplyModuleMethod(
-          defnNir.RuntimePackageClass,
-          defnNir.RuntimePackage_getMonitor,
-          Seq(receiverp)
-        )
-      val enter = genApplyMethod(
-        defnNir.RuntimeMonitor_enter,
-        statically = true,
-        monitor,
-        Seq.empty
-      )
-      val ret = bodyGen(this)
-      val exit = genApplyMethod(
-        defnNir.RuntimeMonitor_exit,
-        statically = true,
-        monitor,
-        Seq.empty
-      )
+      // Here we wrap the synchronized call into the try-finally block
+      // to ensure that monitor would be released even in case of the exception
+      // or in case of non-local returns
+      val nested = new ExprBuffer()
+      val normaln = fresh()
+      val handler = fresh()
+      val mergen = fresh()
 
-      ret
+      // scalanative.runtime.`package`.enterMonitor(receiver)
+      genExpr(Apply(ref(defnNir.RuntimePackage_enterMonitorR), List(receiverp)))
+
+      // synchronized block
+      val retty = {
+        scoped(curUnwindHandler := Some(handler)) {
+          nested.label(normaln)
+          val res = bodyGen(nested)
+          nested.jump(mergen, Seq(res))
+          res.ty
+        }
+      }
+
+      // dummy exception handler,
+      // monitorExit call would be added to it in genTryFinally transformer
+      locally {
+        val excv = Val.Local(fresh(), Rt.Object)
+        nested.label(handler, Seq(excv))
+        nested.raise(excv, unwind)
+        nested.jump(mergen, Seq(Val.Zero(retty)))
+      }
+
+      // Append try/catch instructions to the outher instruction buffer.
+      buf.jump(Next(normaln))
+      buf ++= genTryFinally(
+        // scalanative.runtime.`package`.exitMonitor(receiver)
+        Apply(ref(defnNir.RuntimePackage_exitMonitorR), List(receiverp)),
+        nested.toSeq
+      )
+      val mergev = Val.Local(fresh(), retty)
+      buf.label(mergen, Seq(mergev))
+      mergev
     }
 
     private def genThrow(tree: Tree, args: List[Tree]): Val = {
@@ -1868,7 +1885,9 @@ trait NirGenExpr(using Context) {
         case LOAD_RAW_SIZE => nir.Type.Size
         case LOAD_OBJECT   => Rt.Object
       }
-      buf.load(ty, ptr, unwind)
+      val syncAttrs =
+        Option.when(ptrp.symbol.isVolatile)(SyncAttrs(MemoryOrder.Acquire))
+      buf.load(ty, ptr, unwind, syncAttrs)
     }
 
     private def genRawPtrStoreOp(app: Apply, code: Int): Val = {
@@ -1891,7 +1910,10 @@ trait NirGenExpr(using Context) {
         case STORE_RAW_SIZE => nir.Type.Size
         case STORE_OBJECT   => Rt.Object
       }
-      buf.store(ty, ptr, value, unwind)
+      val syncAttrs = Option.when(ptrp.symbol.isVolatile)(
+        SyncAttrs(MemoryOrder.Release)
+      )
+      buf.store(ty, ptr, value, unwind, syncAttrs)
     }
 
     private def genRawPtrElemOp(app: Apply, code: Int): Val = {
@@ -2079,7 +2101,13 @@ trait NirGenExpr(using Context) {
       val Apply(_, Seq(sizep)) = app
 
       val size = genExpr(sizep)
-      val unboxed = buf.unbox(size.ty, size, unwind)(using sizep.span)
+      val sizeTy = Type.normalize(size.ty)
+      val unboxed =
+        if Type.isSizeBox(sizeTy) then
+          buf.unbox(sizeTy, size, unwind)(using sizep.span)
+        else
+          assert(Type.box.contains(sizeTy), s"Not a primitive type: ${sizeTy}")
+          size
 
       buf.stackalloc(nir.Type.Byte, unboxed, unwind)(using app.span)
     }
@@ -2167,8 +2195,13 @@ trait NirGenExpr(using Context) {
       assert(sym.isExtern, "loadExtern was not extern")
 
       val name = Val.Global(genName(sym), Type.Ptr)
-
-      fromExtern(ty, buf.load(externTy, name, unwind))
+      val syncAttrs = Option.when(sym.isVolatile)(
+        SyncAttrs(MemoryOrder.Acquire)
+      )
+      fromExtern(
+        ty,
+        buf.load(externTy, name, unwind, syncAttrs)
+      )
     }
 
     def genStoreExtern(externTy: nir.Type, sym: Symbol, value: Val)(using
@@ -2177,8 +2210,11 @@ trait NirGenExpr(using Context) {
       assert(sym.isExtern, "storeExtern was not extern")
       val name = Val.Global(genName(sym), Type.Ptr)
       val externValue = toExtern(externTy, value)
+      val syncAttrs = Option.when(sym.isVolatile)(
+        SyncAttrs(MemoryOrder.Release)
+      )
 
-      buf.store(externTy, name, externValue, unwind)
+      buf.store(externTy, name, externValue, unwind, syncAttrs)
     }
 
     def toExtern(expectedTy: nir.Type, value: Val)(using nir.Position): Val =

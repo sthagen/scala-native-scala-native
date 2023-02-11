@@ -5,13 +5,14 @@ import java.io.File
 import java.nio.file.{Path, Paths, Files}
 import scala.collection.mutable
 import scala.scalanative.build.Config
-import scala.scalanative.build.core.ScalaNative.{dumpDefns, encodedMainClass}
+import scala.scalanative.build.ScalaNative.{dumpDefns, encodedMainClass}
 import scala.scalanative.io.VirtualDirectory
 import scala.scalanative.nir._
 import scala.scalanative.util.{Scope, partitionBy, procs}
 import scala.scalanative.compat.CompatParColls.Converters._
 import java.nio.file.StandardCopyOption
 
+import scala.scalanative.build.ScalaNative
 object CodeGen {
 
   /** Lower and generate code for given assembly. */
@@ -19,8 +20,9 @@ object CodeGen {
     val defns = linked.defns
     val proxies = GenerateReflectiveProxies(linked.dynimpls, defns)
 
+    implicit val platform: PlatformInfo = PlatformInfo(config)
     implicit val meta: Metadata =
-      new Metadata(linked, proxies, config.compilerConfig.is32BitPlatform)
+      new Metadata(linked, config.compilerConfig, proxies)
 
     val generated = Generate(encodedMainClass(config), defns ++ proxies)
     val embedded = ResourceEmbedder(config)
@@ -49,7 +51,7 @@ object CodeGen {
   ): Seq[Path] =
     Scope { implicit in =>
       val env = assembly.map(defn => defn.name -> defn).toMap
-      val workdir = VirtualDirectory.real(config.workdir)
+      val workDir = VirtualDirectory.real(config.workDir)
 
       // Partition into multiple LLVM IR files proportional to number
       // of available processesors. This prevents LLVM from optimizing
@@ -59,7 +61,7 @@ object CodeGen {
           .map {
             case (id, defns) =>
               val sorted = defns.sortBy(_.name.show)
-              Impl(config, env, sorted).gen(id.toString, workdir)
+              Impl(env, sorted).gen(id.toString, workDir)
           }
           .toSeq
           .seq
@@ -75,7 +77,7 @@ object CodeGen {
           if (name.isEmpty) "__empty_package" else name
         }
 
-        val ctx = new IncrementalCodeGenContext(config.workdir)
+        val ctx = new IncrementalCodeGenContext(config.workDir)
         ctx.collectFromPreviousState()
         try
           assembly
@@ -84,7 +86,7 @@ object CodeGen {
             .map {
               case (packageName, defns) =>
                 val packagePath = packageName.replace(".", File.separator)
-                val outFile = config.workdir.resolve(s"$packagePath.ll")
+                val outFile = config.workDir.resolve(s"$packagePath.ll")
                 val ownerDirectory = outFile.getParent()
 
                 ctx.addEntry(packageName, defns)
@@ -92,13 +94,13 @@ object CodeGen {
                   val sorted = defns.sortBy(_.name.show)
                   if (!Files.exists(ownerDirectory))
                     Files.createDirectories(ownerDirectory)
-                  Impl(config, env, sorted).gen(packagePath, workdir)
+                  Impl(env, sorted).gen(packagePath, workDir)
                 } else {
                   assert(ownerDirectory.toFile.exists())
                   config.logger.debug(
                     s"Content of package has not changed, skiping generation of $packagePath.ll"
                   )
-                  config.workdir.resolve(s"$packagePath.ll")
+                  config.workDir.resolve(s"$packagePath.ll")
                 }
             }
             .seq
@@ -115,7 +117,7 @@ object CodeGen {
       // Clang's LTO is not available.
       def single(): Seq[Path] = {
         val sorted = assembly.sortBy(_.name.show)
-        Impl(config, env, sorted).gen(id = "out", workdir) :: Nil
+        Impl(env, sorted).gen(id = "out", workDir) :: Nil
       }
 
       import build.Mode._
@@ -133,12 +135,12 @@ object CodeGen {
     import scala.scalanative.codegen.AbstractCodeGen
     import scala.scalanative.codegen.compat.os._
 
-    def apply(config: Config, env: Map[Global, Defn], defns: Seq[Defn])(implicit
+    def apply(env: Map[Global, Defn], defns: Seq[Defn])(implicit
         meta: Metadata
     ): AbstractCodeGen = {
-      new AbstractCodeGen(config, env, defns) {
+      new AbstractCodeGen(env, defns) {
         override val os: OsCompat = {
-          if (this.config.targetsWindows) new WindowsCompat(this)
+          if (meta.platform.targetsWindows) new WindowsCompat(this)
           else new UnixCompat(this)
         }
       }

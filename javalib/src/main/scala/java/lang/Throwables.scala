@@ -5,10 +5,11 @@ import scalanative.unsafe._
 import scalanative.unsigned._
 import scalanative.runtime.unwind
 import scala.scalanative.meta.LinktimeInfo
+// TODO: Replace with j.u.c.ConcurrentHashMap when implemented to remove scalalib dependency
+import scala.collection.concurrent.TrieMap
 
 private[lang] object StackTrace {
-  private val cache =
-    collection.mutable.HashMap.empty[CUnsignedLong, StackTraceElement]
+  private val cache = TrieMap.empty[CUnsignedLong, StackTraceElement]
 
   private def makeStackTraceElement(
       cursor: Ptr[scala.Byte]

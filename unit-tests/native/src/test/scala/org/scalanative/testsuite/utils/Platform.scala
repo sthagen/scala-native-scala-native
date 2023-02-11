@@ -19,6 +19,7 @@ object Platform {
   final val hasCompliantArrayIndexOutOfBounds = true
 
   final val executingInJVMOnJDK8OrLower = false
+  final val executingInJVMOnLowerThenJDK11 = false
   final val executingInJVMOnLowerThanJDK15 = false
   final val executingInJVMOnLowerThanJDK17 = false
   final val executingInJVMOnJDK17 = false
@@ -47,4 +48,8 @@ object Platform {
 
   final val hasArm64SignalQuirk =
     isArm64 || (runtime.Platform.probeMacX8664IsArm64() > 0)
+
+  final val isMultithreadingEnabled =
+    scala.scalanative.meta.LinktimeInfo.isMultithreadingEnabled
+
 }

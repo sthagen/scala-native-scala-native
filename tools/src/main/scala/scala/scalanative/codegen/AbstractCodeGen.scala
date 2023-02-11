@@ -12,14 +12,13 @@ import scala.scalanative.util.{ShowBuilder, unreachable, unsupported}
 import scala.scalanative.{build, linker, nir}
 
 private[codegen] abstract class AbstractCodeGen(
-    val config: build.Config,
     env: Map[Global, Defn],
     defns: Seq[Defn]
 )(implicit meta: Metadata) {
-  val os: OsCompat
+  import meta.platform
+  import platform._
 
-  private val targetTriple: Option[String] = config.compilerConfig.targetTriple
-  private val is32BitPlatform: Boolean = config.compilerConfig.is32BitPlatform
+  val os: OsCompat
 
   private var currentBlockName: Local = _
   private var currentBlockSplit: Int = _
@@ -175,7 +174,7 @@ private[codegen] abstract class AbstractCodeGen(
 
     newline()
     str(if (isDecl) "declare " else "define ")
-    if (config.targetsWindows && !isDecl && attrs.isExtern) {
+    if (targetsWindows && !isDecl && attrs.isExtern) {
       // Generate export modifier only for extern (C-ABI compliant) signatures
       val Global.Member(_, sig) = name: @unchecked
       if (sig.isExtern) str("dllexport ")
@@ -370,8 +369,8 @@ private[codegen] abstract class AbstractCodeGen(
       case Type.Bool                                             => str("i1")
       case i: Type.FixedSizeI => str("i"); str(i.width)
       case Type.Size =>
-        if (is32BitPlatform) str("i32")
-        else str("i64")
+        str("i")
+        str(platform.sizeOfPtrBits)
       case Type.Float  => str("float")
       case Type.Double => str("double")
       case Type.ArrayValue(ty, n) =>
@@ -430,7 +429,7 @@ private[codegen] abstract class AbstractCodeGen(
       case Val.Zero(ty) => str("zeroinitializer")
       case Val.Byte(v)  => str(v)
       case Val.Size(v) =>
-        if (!is32BitPlatform) str(v)
+        if (!platform.is32Bit) str(v)
         else if (v.toInt == v) str(v.toInt)
         else unsupported("Emitting size values that exceed the platform bounds")
       case Val.Char(v)   => str(v.toInt)
@@ -654,8 +653,11 @@ private[codegen] abstract class AbstractCodeGen(
         }
         genCall(genBind, callDef, unwind)
 
-      case Op.Load(ty, ptr) =>
+      case Op.Load(ty, ptr, syncAttrs) =>
         val pointee = fresh()
+        val isAtomic = isMultithreadingEnabled && syncAttrs.isDefined
+        val isVolatile =
+          isMultithreadingEnabled && syncAttrs.exists(_.isVolatile)
 
         newline()
         str("%")
@@ -669,28 +671,42 @@ private[codegen] abstract class AbstractCodeGen(
         newline()
         genBind()
         str("load ")
+        if (isAtomic) str("atomic ")
+        if (isVolatile) str("volatile ")
         genType(ty)
         str(", ")
         genType(ty)
         str("* %")
         genLocal(pointee)
-        ty match {
-          case refty: Type.RefKind =>
-            val (nonnull, deref, size) = toDereferenceable(refty)
-            if (nonnull) {
-              str(", !nonnull !{}")
-            }
-            str(", !")
-            str(deref)
-            str(" !{i64 ")
-            str(size)
-            str("}")
-          case _ =>
-            ()
+        if (isAtomic) {
+          str(" ")
+          syncAttrs.foreach(genSyncAttrs)
+          str(", align ")
+          str(MemoryLayout.alignmentOf(ty))
+        } else {
+          ty match {
+            case refty: Type.RefKind =>
+              val (nonnull, deref, size) = toDereferenceable(refty)
+              if (nonnull) {
+                str(", !nonnull !{}")
+              }
+              str(", !")
+              str(deref)
+              str(" !{i")
+              str(platform.sizeOfPtrBits)
+              str(" ")
+              str(size)
+              str("}")
+            case _ =>
+              ()
+          }
         }
 
-      case Op.Store(ty, ptr, value) =>
+      case Op.Store(ty, ptr, value, syncAttrs) =>
         val pointee = fresh()
+        val isAtomic = isMultithreadingEnabled && syncAttrs.isDefined
+        val isVolatile =
+          isMultithreadingEnabled && syncAttrs.exists(_.isVolatile)
 
         newline()
         str("%")
@@ -704,11 +720,19 @@ private[codegen] abstract class AbstractCodeGen(
         newline()
         genBind()
         str("store ")
+        if (isAtomic) str("atomic ")
+        if (isVolatile) str("volatile ")
         genVal(value)
         str(", ")
         genType(ty)
         str("* %")
         genLocal(pointee)
+        if (isAtomic) syncAttrs.foreach {
+          str(" ")
+          genSyncAttrs(_)
+        }
+        str(", align ")
+        str(MemoryLayout.alignmentOf(ty))
 
       case Op.Elem(ty, ptr, indexes) =>
         val pointee = fresh()
@@ -753,7 +777,7 @@ private[codegen] abstract class AbstractCodeGen(
         genType(ty)
         str(", ")
         genVal(n)
-        str(if (is32BitPlatform) ", align 4" else ", align 8")
+        str(if (platform.is32Bit) ", align 4" else ", align 8")
 
         newline()
         genBind()
@@ -937,9 +961,33 @@ private[codegen] abstract class AbstractCodeGen(
         genVal(v)
         str(" to ")
         genType(ty)
+      case Op.Fence(syncAttrs) =>
+        str("fence ")
+        genSyncAttrs(syncAttrs)
+
       case op =>
         unsupported(op)
     }
+  }
+
+  private def genSyncAttrs(
+      attrs: SyncAttrs
+  )(implicit sb: ShowBuilder): Unit = {
+    import sb._
+    val SyncAttrs(memoryOrder, _, scope) = attrs
+    scope.foreach { scope =>
+      str("syncscope(")
+      genGlobal(scope)
+      str(") ")
+    }
+    str(memoryOrder match {
+      case MemoryOrder.Unordered => "unordered"
+      case MemoryOrder.Monotonic => "monotonic"
+      case MemoryOrder.Acquire   => "acquire"
+      case MemoryOrder.Release   => "release"
+      case MemoryOrder.AcqRel    => "acq_rel"
+      case MemoryOrder.SeqCst    => "seq_cst"
+    })
   }
 
   private[codegen] def genNext(next: Next)(implicit sb: ShowBuilder): Unit = {
@@ -966,15 +1014,13 @@ private[codegen] abstract class AbstractCodeGen(
   ): Unit = conv match {
     case Conv.ZSizeCast | Conv.SSizeCast =>
       val fromSize = fromType match {
-        case Type.Size =>
-          if (is32BitPlatform) 32 else 64
+        case Type.Size             => platform.sizeOfPtrBits
         case Type.FixedSizeI(s, _) => s
         case o                     => unsupported(o)
       }
 
       val toSize = toType match {
-        case Type.Size =>
-          if (is32BitPlatform) 32 else 64
+        case Type.Size             => platform.sizeOfPtrBits
         case Type.FixedSizeI(s, _) => s
         case o                     => unsupported(o)
       }
