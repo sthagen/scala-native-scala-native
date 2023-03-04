@@ -149,6 +149,22 @@ sealed trait Config {
     compilerConfig.targetTriple.exists { customTriple =>
       Seq("mac", "apple", "darwin").exists(customTriple.contains(_))
     }
+
+  private[scalanative] lazy val targetsMsys: Boolean = {
+    compilerConfig.targetTriple.fold(Platform.isMsys) { customTriple =>
+      customTriple.contains("windows-msys")
+    }
+  }
+  private[scalanative] lazy val targetsCygwin: Boolean = {
+    compilerConfig.targetTriple.fold(Platform.isCygwin) { customTriple =>
+      customTriple.contains("windows-cygnus")
+    }
+  }
+
+  private[scalanative] lazy val targetsLinux: Boolean = Platform.isLinux ||
+    compilerConfig.targetTriple.exists { customTriple =>
+      Seq("linux").exists(customTriple.contains(_))
+    }
 }
 
 /** Factory to create [[#empty]] [[Config]] objects */
