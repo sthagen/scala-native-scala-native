@@ -8,21 +8,20 @@
 package java.util.concurrent
 
 import java.lang.Thread.UncaughtExceptionHandler
-import java.lang.invoke.MethodHandles
 import java.lang.invoke.VarHandle
 import java.util.concurrent.ForkJoinPool.WorkQueue.getAndClearSlot
 import java.util.{ArrayList, Collection, Collections, List, concurrent}
 import java.util.function.Predicate
-import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.Condition
-import scala.annotation._
 import scala.scalanative.annotation._
 import scala.scalanative.unsafe._
 import scala.scalanative.libc.atomic.{CAtomicInt, CAtomicLongLong, CAtomicRef}
 import scala.scalanative.runtime.{fromRawPtr, Intrinsics, ObjectArray}
 
+import scala.scalanative.libc.atomic.memory_order._
 import ForkJoinPool._
 
 class ForkJoinPool private (
@@ -55,9 +54,6 @@ class ForkJoinPool private (
   @alwaysinline private def runStateAtomic = new CAtomicInt(
     fromRawPtr(Intrinsics.classFieldRawPtr(this, "runState"))
   )
-  @alwaysinline private def stealCountAtomic = new CAtomicLongLong(
-    fromRawPtr(Intrinsics.classFieldRawPtr(this, "stealCount"))
-  )
   @alwaysinline private def threadIdsAtomic = new CAtomicLongLong(
     fromRawPtr(Intrinsics.classFieldRawPtr(this, "threadIds"))
   )
@@ -84,7 +80,8 @@ class ForkJoinPool private (
   @alwaysinline
   private def getAndSetParallelism(v: Int): Int = parallelismAtomic.exchange(v)
   @alwaysinline
-  private def getParallelismOpaque(): Int = parallelismAtomic.load()
+  private def getParallelismOpaque(): Int =
+    parallelismAtomic.load(memory_order_relaxed)
 
   // Creating, registering, and deregistering workers
 
@@ -612,7 +609,7 @@ class ForkJoinPool private (
         r += 2
       }
     }
-    ??? // unreachable
+    -1 // unreachable
   }
 
   final private[concurrent] def helpComplete(
@@ -672,8 +669,8 @@ class ForkJoinPool private (
               }
             } else
               t match {
-                case _f: CountedCompleter[_] =>
-                  var f: CountedCompleter[_] = _f
+                case t: CountedCompleter[_] =>
+                  var f: CountedCompleter[_] = t
                   var break = false
                   while (!break) {
                     if (f eq task) break = true
@@ -699,7 +696,7 @@ class ForkJoinPool private (
         r += 1
       }
     }
-    ??? // unreachable
+    -1 // unreachable
   }
 
   private def helpQuiesce(
@@ -1009,7 +1006,6 @@ class ForkJoinPool private (
     if (factory == null || unit == null) throw new NullPointerException
     val p = parallelism
     val size: Int = 1 << (33 - Integer.numberOfLeadingZeros(p - 1))
-    val corep = corePoolSize.max(p).min(MAX_CAP)
     this.parallelism = p
     this.queues = new Array[WorkQueue](size)
   }
@@ -1560,11 +1556,11 @@ object ForkJoinPool {
   final class WorkQueue private (
       val owner: ForkJoinWorkerThread
   ) {
-    var base: Int = _ // index of next slot for poll
     var config: Int = _ // index, mode, ORed with SRC after init
-    var top: Int = _ // index of next slot for push
-    var stackPred: Int = 0 // pool stack (ctl) predecessor link
     var array: Array[ForkJoinTask[_]] = _ // the queued tasks power of 2 size
+    var stackPred: Int = 0 // pool stack (ctl) predecessor link
+    var base: Int = _ // index of next slot for poll
+    var top: Int = _ // index of next slot for push
     @volatile var access: Int = 0 // values 0, 1 (locked), PARKED, STOP
     @volatile var phase: Int = 0 // versioned, negative if inactive
     @volatile var source: Int = 0 // source queue id, lock, or sentinel
@@ -1598,7 +1594,7 @@ object ForkJoinPool {
       (config & 0xffff) >>> 1 // ignore odd/even tag bit
 
     final def queueSize(): Int = {
-      val _ = access // for ordering effect
+      VarHandle.acquireFence()
       0.max(top - base) // ignore transient negative
     }
 
@@ -1637,6 +1633,8 @@ object ForkJoinPool {
               task != null
             }) ()
           }
+          VarHandle.releaseFence()
+          array = newArray
         } else a(m & s) = task
         getAndSetAccess(0)
         if ((resize || (a(m & (s - 1)) == null && signalIfEmpty)) &&
@@ -1672,7 +1670,7 @@ object ForkJoinPool {
           }
           !break && (p - b > 0)
         }) ()
-        VarHandle.releaseFence() // for timely index updates
+        VarHandle.storeStoreFence() // for timely index updates
       }
       t
     }
@@ -1764,7 +1762,7 @@ object ForkJoinPool {
           else if (t != null) {
             if (WorkQueue.casSlotToNull(a, k, t)) {
               base = nb
-              VarHandle.releaseFence()
+              VarHandle.storeStoreFence()
               return t
             }
             break = true // contended
@@ -1857,8 +1855,8 @@ object ForkJoinPool {
           val k = (cap - 1) & s
           val t = if (cap > 0) a(k) else null
           t match {
-            case _f: CountedCompleter[_] =>
-              var f: CountedCompleter[_] = _f
+            case t: CountedCompleter[_] =>
+              var f: CountedCompleter[_] = t
               var break = false
               while (!break) {
                 if (f eq task)
@@ -1916,7 +1914,7 @@ object ForkJoinPool {
                 break = true
               else if (WorkQueue.casSlotToNull(a, k, t)) {
                 base = nb
-                VarHandle.releaseFence()
+                VarHandle.storeStoreFence()
                 t.doExec()
               }
             } else if (a(nk) == null)

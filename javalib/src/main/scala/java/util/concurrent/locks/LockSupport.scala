@@ -6,8 +6,6 @@
 
 package java.util.concurrent.locks
 
-import java.util.Objects
-
 import scala.scalanative.annotation.alwaysinline
 import scala.scalanative.runtime.{NativeThread, fromRawPtr}
 import scala.scalanative.runtime.Intrinsics.classFieldRawPtr
@@ -23,8 +21,8 @@ object LockSupport {
     val nativeThread = NativeThread.currentNativeThread
     val thread = nativeThread.thread
     setBlocker(thread, blocker)
-    nativeThread.park()
-    setBlocker(thread, null: Object)
+    try nativeThread.park()
+    finally setBlocker(thread, null: Object)
   }
 
   def parkNanos(nanos: Long): Unit =
@@ -34,8 +32,8 @@ object LockSupport {
     val nativeThread = NativeThread.currentNativeThread
     val thread = nativeThread.thread
     setBlocker(thread, blocker)
-    nativeThread.parkNanos(nanos)
-    setBlocker(thread, null: Object)
+    try nativeThread.parkNanos(nanos)
+    finally setBlocker(thread, null: Object)
   }
 
   def parkUntil(deadline: Long): Unit =
@@ -45,8 +43,8 @@ object LockSupport {
     val nativeThread = NativeThread.currentNativeThread
     val thread = nativeThread.thread
     setBlocker(thread, blocker)
-    nativeThread.parkUntil(deadline)
-    setBlocker(thread, null: Object)
+    try nativeThread.parkUntil(deadline)
+    finally setBlocker(thread, null: Object)
   }
 
   def unpark(thread: Thread): Unit = {
@@ -54,7 +52,7 @@ object LockSupport {
   }
 
   @alwaysinline private def parkBlockerRef(thread: Thread): Ptr[Object] =
-    fromRawPtr(classFieldRawPtr(Thread.currentThread(), "parkBlocker"))
+    fromRawPtr(classFieldRawPtr(thread, "parkBlocker"))
 
   @alwaysinline private def setBlocker(
       thread: Thread,
