@@ -1,12 +1,29 @@
 package build
 
+/* Note to Contributors:
+ *   Scala Native supports a number of Scala versions. These can be
+ *   described as Major.Minor.Path.
+ *
+ *   Support for Scala 2.12.lowest is provided by binary compatibility with
+ *   Scala 2.12.highest.
+ *
+ *   This means that Continuous Integration (CI) is run using
+ *   the highest patch version. Scala Native may or may not build from
+ *   from scratch when using lower patch versions.
+ *
+ *   This information can save time and frustration when preparing
+ *   contributions for submission: Build privately using highest,
+ *   not lowest, patch version.
+ */
+
 object ScalaVersions {
   // Versions of Scala used for publishing compiler plugins
   val crossScala212 = (13 to 17).map(v => s"2.12.$v")
   val crossScala213 = (4 to 10).map(v => s"2.13.$v")
   val crossScala3 = List(
     (0 to 3).map(v => s"3.1.$v"),
-    (0 to 2).map(v => s"3.2.$v")
+    (0 to 2).map(v => s"3.2.$v"),
+    (0 to 0).map(v => s"3.3.$v")
   ).flatten
 
   // Version of Scala 3 standard library sources used for publishing
