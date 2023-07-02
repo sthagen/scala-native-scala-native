@@ -1,9 +1,10 @@
 package java.nio.channels
 
-import java.nio.file.Files
-
 import java.nio.{ByteBuffer, MappedByteBuffer, MappedByteBufferImpl}
+import java.nio.channels.FileChannel.MapMode
+import java.nio.file.Files
 import java.nio.file.WindowsException
+
 import scala.scalanative.nio.fs.unix.UnixException
 
 import java.io.FileDescriptor
@@ -46,7 +47,7 @@ private[java] final class FileChannelImpl(
   private def throwPosixException(functionName: String): Unit = {
     if (!isWindows) {
       val errnoString = fromCString(string.strerror(errno))
-      throw new IOException("${functionName} failed: ${errnoString}")
+      throw new IOException(s"${functionName} failed: ${errnoString}")
     }
   }
 
@@ -134,11 +135,45 @@ private[java] final class FileChannelImpl(
       position: Long,
       size: Long
   ): MappedByteBuffer = {
-    if ((mode eq FileChannel.MapMode.READ_ONLY) && !openForReading)
+    if (!openForReading)
       throw new NonReadableChannelException
-    if ((mode eq FileChannel.MapMode.READ_WRITE) && (!openForReading || !openForWriting))
-      throw new NonWritableChannelException
-    MappedByteBufferImpl(mode, position, size.toInt, fd, this)
+
+    // JVM states position is non-negative, hence 0 is allowed.
+    if (position < 0)
+      throw new IllegalArgumentException("Negative position")
+
+    /* JVM requires the "size" argument to be a long, but throws
+     * an exception if that long is greater than Integer.MAX_VALUE.
+     * toInt() would cause such a large value to rollover to a negative value.
+     *
+     * Call to MappedByteBufferImpl() below truncates its third argument
+     * to an Int, knowing this guard is in place.
+     *
+     * Java is playing pretty fast & loose with its Ints & Longs, but that is
+     * the specification & practice that needs to be followed.
+     */
+
+    if ((size < 0) || (size > Integer.MAX_VALUE))
+      throw new IllegalArgumentException("Negative size")
+
+    ensureOpen()
+
+    if (mode ne MapMode.READ_ONLY) {
+      // FileChannel.open() has previously rejected READ + APPEND combination.
+      if (!openForWriting)
+        throw new NonWritableChannelException
+
+      // This "lengthen" branch is tested/exercised in MappedByteBufferTest.
+      // Look in MappedByteBufferTest for tests of this "lengthen" block.
+      val currentFileSize = this.size()
+      // Detect Long overflow & throw. Room for improvement here.
+      val newFileSize = Math.addExact(position, size)
+      if (newFileSize > currentFileSize)
+        this.lengthen(newFileSize)
+    }
+
+    // RE: toInt() truncation safety, see note for "size" arg checking above.
+    MappedByteBufferImpl(mode, position, size.toInt, fd)
   }
 
   override def position(offset: Long): FileChannel = {
@@ -256,8 +291,7 @@ private[java] final class FileChannelImpl(
     } else {
       val readCount = unistd.read(fd.fd, buf, count.toUInt)
       if (readCount == 0) {
-        // end of file
-        -1
+        -1 // end of file
       } else if (readCount < 0) {
         // negative value (typically -1) indicates that read failed
         throw UnixException(file.fold("")(_.toString), errno)
@@ -315,31 +349,97 @@ private[java] final class FileChannelImpl(
     nb
   }
 
-  override def truncate(size: Long): FileChannel =
-    if (!openForWriting) {
-      throw new IOException("Invalid argument")
+  private def lengthen(newFileSize: Long): Unit = {
+    /* Preconditions: only caller, this.map(),  has ensured:
+     *   - newFileSize > currentSize
+     *   - file was opened for writing.
+     *   - "this" channel is open
+     */
+    if (!isWindows) {
+      val status = unistd.ftruncate(fd.fd, newFileSize.toSize)
+      if (status < 0)
+        throwPosixException("ftruncate")
     } else {
-      ensureOpen()
       val currentPosition = position()
+
       val hasSucceded =
-        if (isWindows) {
+        FileApi.SetFilePointerEx(
+          fd.handle,
+          newFileSize,
+          null,
+          FILE_BEGIN
+        ) &&
+          FileApi.SetEndOfFile(fd.handle)
+
+      if (!hasSucceded)
+        throw new IOException("Failed to lengthen file")
+
+      /* Windows doc states that the content of the bytes between the
+       * currentPosition and the new end of file is undefined.
+       * In practice, NTFS will zero those bytes. The next step is redundant
+       * if one is _sure_ the file system is NTFS.
+       *
+       * Write a single byte to just before EOF to convince the
+       * Windows file systems to actualize and zero the undefined blocks.
+       */
+      write(ByteBuffer.wrap(Array[Byte](0.toByte)), newFileSize - 1)
+
+      position(currentPosition)
+    }
+
+    /* This next step may not be strictly necessary; it is included for the
+     * sake of robustness across as yet unseen Operating & File systems.
+     * The sync can be re-visited and  micro-optimized if performance becomes a
+     * concern.
+     *
+     * Most contemporary Operating and File systems will have ensured that
+     * the changes above are in non-volatile storage by the time execution
+     * reaches here.
+     *
+     * Give those corner cases where this is not so a strong hint that it
+     * should be. If the data is already non-volatile, this should be as
+     * fast as a kernel call can be.
+     */
+    force(true)
+  }
+
+  override def truncate(newSize: Long): FileChannel = {
+    if (newSize < 0)
+      throw new IllegalArgumentException("Negative size")
+
+    ensureOpen()
+
+    if (!openForWriting)
+      throw new NonWritableChannelException()
+
+    val currentPosition = position()
+
+    if (newSize < size()) {
+      if (isWindows) {
+        val hasSucceded =
           FileApi.SetFilePointerEx(
             fd.handle,
-            size,
+            newSize,
             null,
             FILE_BEGIN
           ) &&
-          FileApi.SetEndOfFile(fd.handle)
-        } else {
-          unistd.ftruncate(fd.fd, size.toSize) == 0
-        }
-      if (!hasSucceded) {
-        throw new IOException("Failed to truncate file")
+            FileApi.SetEndOfFile(fd.handle)
+        if (!hasSucceded)
+          throw new IOException("Failed to truncate file")
+      } else {
+        val err = unistd.ftruncate(fd.fd, newSize.toSize)
+        if (err != 0)
+          throwPosixException("ftruncate")
       }
-      if (currentPosition > size) position(size)
-      else position(currentPosition)
-      this
+
     }
+
+    // Always check, to avoid moon-shot corner cases.
+    if (currentPosition > newSize)
+      position(newSize)
+
+    this
+  }
 
   override def write(
       buffers: Array[ByteBuffer],
@@ -459,7 +559,8 @@ private[java] final class FileChannelImpl(
    *         not the true (Long) value. Matches the specification, but gotcha!
    */
 
-  def available(): Int = {
+  // local API extension
+  private[java] def available(): Int = {
     ensureOpen()
 
     val currentPosition = position()
