@@ -11,6 +11,8 @@ import java.io.FileDescriptor
 import java.io.File
 import java.io.IOException
 
+import java.util.Objects
+
 import scala.scalanative.meta.LinktimeInfo.isWindows
 
 import scala.scalanative.unsafe._
@@ -42,22 +44,54 @@ private[java] final class FileChannelImpl(
     file: Option[File],
     deleteFileOnClose: Boolean,
     openForReading: Boolean,
-    openForWriting: Boolean
+    openForWriting: Boolean,
+    openForAppending: Boolean = false
 ) extends FileChannel {
+  /* Note:
+   *   Channels are described in the Java documentation as thread-safe.
+   *   This implementation is, most patently _not_ thread-safe.
+   *   Use with only one thread accessing the channel, even for READS.
+   */
+
+  if (openForAppending)
+    seekEOF() // so a position() before first APPEND write() matches JVM.
+
+  private def ensureOpen(): Unit =
+    if (!isOpen()) throw new ClosedChannelException()
+
+  private def ensureOpenForWrite(): Unit = {
+    ensureOpen()
+    if (!openForWriting)
+      throw new NonWritableChannelException()
+  }
+
+  private def seekEOF(): Unit = {
+    if (isWindows) {
+      SetFilePointerEx(
+        fd.handle,
+        distanceToMove = 0,
+        newFilePointer = null,
+        moveMethod = FILE_END
+      )
+    } else {
+      val pos = unistd.lseek(fd.fd, 0, stdio.SEEK_END);
+      if (pos < 0)
+        throwPosixException("lseek")
+    }
+  }
+
   private def throwPosixException(functionName: String): Unit = {
     if (!isWindows) {
       val errnoString = fromCString(string.strerror(errno))
-      throw new IOException(s"${functionName} failed: ${errnoString}")
+      throw new IOException("${functionName} failed: ${errnoString}")
     }
   }
 
   override def force(metadata: Boolean): Unit =
     fd.sync()
 
-  @inline private def assertIfCanLock(): Unit = {
-    if (!isOpen()) throw new ClosedChannelException()
-    if (!openForWriting) throw new NonWritableChannelException()
-  }
+  @inline private def assertIfCanLock(): Unit =
+    ensureOpenForWrite()
 
   override def tryLock(
       position: Long,
@@ -176,7 +210,8 @@ private[java] final class FileChannelImpl(
     MappedByteBufferImpl(mode, position, size.toInt, fd)
   }
 
-  override def position(offset: Long): FileChannel = {
+  // change position, even in APPEND mode. Use _carefully_.
+  private def compelPosition(offset: Long): FileChannel = {
     if (isWindows)
       FileApi.SetFilePointerEx(
         fd.handle,
@@ -184,7 +219,19 @@ private[java] final class FileChannelImpl(
         null,
         FILE_BEGIN
       )
-    else unistd.lseek(fd.fd, offset.toSize, stdio.SEEK_SET)
+    else {
+      val pos = unistd.lseek(fd.fd, offset.toSize, stdio.SEEK_SET)
+      if (pos < 0)
+        throwPosixException("lseek")
+    }
+
+    this
+  }
+
+  override def position(offset: Long): FileChannel = {
+    if (!openForAppending)
+      compelPosition(offset)
+
     this
   }
 
@@ -199,7 +246,10 @@ private[java] final class FileChannelImpl(
       )
       !filePointer
     } else {
-      unistd.lseek(fd.fd, 0, stdio.SEEK_CUR).toLong
+      val pos = unistd.lseek(fd.fd, 0, stdio.SEEK_CUR).toLong
+      if (pos < 0)
+        throwPosixException("lseek")
+      pos
     }
 
   override def read(
@@ -434,85 +484,160 @@ private[java] final class FileChannelImpl(
 
     }
 
-    // Always check, to avoid moon-shot corner cases.
     if (currentPosition > newSize)
-      position(newSize)
+      compelPosition(newSize)
 
     this
   }
 
-  override def write(
-      buffers: Array[ByteBuffer],
+  private def writeArray(
+      array: Array[Byte],
       offset: Int,
-      length: Int
-  ): Long = {
-    ensureOpen()
-    var i = 0
-    while (i < length) {
-      write(buffers(offset + i))
-      i += 1
-    }
-    i
+      count: Int
+  ): Int = {
+    // Precondition: caller has checked arguments.
+
+    val nWritten =
+      if (count == 0) 0
+      else {
+        // we use the runtime knowledge of the array layout to avoid an
+        // intermediate buffer, and read straight from the array memory.
+        val buf = array.at(offset)
+
+        if (isWindows) {
+          val hasSucceded =
+            WriteFile(fd.handle, buf, count.toUInt, null, null)
+          if (!hasSucceded) {
+            throw WindowsException.onPath(
+              file.fold("<file descriptor>")(_.toString)
+            )
+          }
+
+          count // Windows will fail on partial write, so nWritten == count
+        } else {
+          // unix-like may do partial writes, so be robust to them.
+          val writeCount = unistd.write(fd.fd, buf, count.toUInt)
+
+          if (writeCount < 0) {
+            // negative value (typically -1) indicates that write failed
+            throw UnixException(file.fold("")(_.toString), errno)
+          }
+
+          writeCount // may be < requested count
+        }
+      }
+
+    nWritten
   }
 
-  override def write(buffer: ByteBuffer, pos: Long): Int = {
-    ensureOpen()
-    position(pos)
-    val srcPos: Int = buffer.position()
-    val srcLim: Int = buffer.limit()
-    val lim = math.abs(srcLim - srcPos)
-    val bytes = if (buffer.hasArray()) {
-      buffer.array()
-    } else {
-      val bytes = new Array[Byte](lim)
-      buffer.get(bytes)
-      bytes
-    }
-    write(bytes, 0, lim)
-    buffer.position(srcPos + lim)
-    lim
-  }
-
-  override def write(src: ByteBuffer): Int =
-    write(src, position())
-
-  private def ensureOpen(): Unit =
-    if (!isOpen()) throw new ClosedChannelException()
-
+  // since all of java package can call this, be stricter with argument checks.
   private[java] def write(
       buffer: Array[Byte],
       offset: Int,
       count: Int
-  ): Unit = {
-    if (buffer == null) {
-      throw new NullPointerException
-    }
-    if (offset < 0 || count < 0 || count > buffer.length - offset) {
+  ): Int = {
+    Objects.requireNonNull(buffer, "buffer")
+
+    if ((offset < 0) || (count < 0) || (count > buffer.length - offset))
       throw new IndexOutOfBoundsException
-    }
-    if (count == 0) {
-      return
-    }
 
-    // we use the runtime knowledge of the array layout to avoid
-    // intermediate buffer, and read straight from the array memory
-    val buf = buffer.at(offset)
-    if (isWindows) {
-      val hasSucceded =
-        WriteFile(fd.handle, buf, count.toUInt, null, null)
-      if (!hasSucceded) {
-        throw WindowsException.onPath(
-          file.fold("<file descriptor>")(_.toString)
-        )
-      }
+    writeArray(buffer, offset, count)
+  }
+
+  private def writeByteBuffer(src: ByteBuffer): Int = {
+    // Precondition: caller has ensured that channel is open and open for write
+    val srcPos = src.position()
+    val srcLim = src.limit()
+    val nBytes = srcLim - srcPos // number of bytes in range.
+
+    val (arr, offset) = if (src.hasArray()) {
+      (src.array(), srcPos)
     } else {
-      val writeCount = unistd.write(fd.fd, buf, count.toUInt)
-
-      if (writeCount < 0) {
-        // negative value (typically -1) indicates that write failed
-        throw UnixException(file.fold("")(_.toString), errno)
-      }
+      val ba = new Array[Byte](nBytes)
+      src.get(ba, srcPos, nBytes)
+      (ba, 0)
     }
+
+    val nWritten = writeArray(arr, offset, nBytes)
+
+    /* Advance the srcPos only by the number of bytes actually written.
+     * This allows higher level callers to re-try partial writes
+     * in a 'natural' manner (no buffer futzing required).
+     */
+    src.position(srcPos + nWritten)
+
+    nWritten
+  }
+
+  override def write(
+      srcs: Array[ByteBuffer],
+      offset: Int,
+      length: Int
+  ): Long = {
+
+    Objects.requireNonNull(srcs, "srcs")
+
+    if ((offset < 0) ||
+        (offset > srcs.length) ||
+        (length < 0) ||
+        (length > srcs.length - offset))
+      throw new IndexOutOfBoundsException
+
+    ensureOpenForWrite()
+
+    var totalWritten = 0
+
+    var partialWriteSeen = false
+    var j = 0
+
+    while ((j < length) && !partialWriteSeen) {
+      val src = srcs(j)
+      val srcPos = src.position()
+      val srcLim = src.limit()
+      val nExpected = srcLim - srcPos // number of bytes in range.
+
+      val nWritten = writeByteBuffer(src)
+
+      totalWritten += nWritten
+      if (nWritten < nExpected)
+        partialWriteSeen = true
+
+      j += 1
+    }
+
+    totalWritten
+  }
+
+  /* Write to absolute position, do not change current position.
+   *
+   * Understanding "does not change current position" when the channel
+   * has been opened requires some mind_bending/understanding.
+   *
+   * "Current position" when file has been opened for APPEND is
+   * a logical place, End of File (EOF), not an absolute number.
+   * When APPEND mode changes the position it reports as "current" to the
+   * new EOF rather than stashed position, according to JVM is is not
+   * really changing the "current position".
+   */
+  override def write(src: ByteBuffer, pos: Long): Int = {
+    ensureOpenForWrite()
+    val stashPosition = position()
+    compelPosition(pos)
+
+    val nBytesWritten = writeByteBuffer(src)
+
+    if (!openForAppending)
+      compelPosition(stashPosition)
+    else
+      seekEOF()
+
+    nBytesWritten
+  }
+
+  // Write relative to current position (SEEK_CUR) or, for APPEND, SEEK_END.
+  override def write(src: ByteBuffer): Int = {
+    ensureOpenForWrite()
+    writeByteBuffer(src)
   }
 
   /* The Scala Native implementation of FileInputStream#available delegates

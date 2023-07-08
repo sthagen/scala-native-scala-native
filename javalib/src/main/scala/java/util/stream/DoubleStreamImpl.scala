@@ -121,7 +121,7 @@ private[stream] class DoubleStreamImpl(
     exceptionBuffer.reportExceptions()
   }
 
-  def isParallel(): Boolean = false
+  def isParallel(): Boolean = _parallel
 
   def iterator(): ju.PrimitiveIterator.OfDouble = {
     commenceOperation()
@@ -143,10 +143,17 @@ private[stream] class DoubleStreamImpl(
     this
   }
 
-  // parallel is not yet implemented.
-  def parallel(): DoubleStreamImpl = this
+  def parallel(): DoubleStream = {
+    if (!_parallel)
+      _parallel = true
+    this
+  }
 
-  def sequential(): DoubleStreamImpl = this
+  def sequential(): DoubleStream = {
+    if (_parallel)
+      _parallel = false
+    this
+  }
 
   def spliterator(): Spliterator.OfDouble = {
     commenceOperation()
@@ -559,7 +566,7 @@ private[stream] class DoubleStreamImpl(
   }
 
   def sorted(): DoubleStream = {
-    commenceOperation()
+    // No commenceOperation() here. This is an intermediate operation.
 
     /* Be aware that this method will/should throw on first use if type
      * T is not Comparable[T]. This is described in the Java Stream doc.
@@ -572,17 +579,17 @@ private[stream] class DoubleStreamImpl(
      *   the issue and raises an exception if T is, indeed, not comparable.
      */
 
-    val buffer = new ArrayList[scala.Double]()
-    _spliter.forEachRemaining((e: scala.Double) => { buffer.add(e); () })
+    val buffer = toArray()
 
-    // See if there is a more efficient way of doing this.
-    val nElements = buffer.size()
-    val primitiveDoubles = new Array[scala.Double](nElements)
-    for (j <- 0 until nElements)
-      primitiveDoubles(j) = buffer.get(j)
+    Arrays.sort(buffer)
 
-    Arrays.sort(primitiveDoubles)
-    Arrays.stream(primitiveDoubles)
+    val spl = Spliterators.spliterator(
+      buffer,
+      Spliterator.SORTED | Spliterator.ORDERED |
+        Spliterator.SIZED | Spliterator.SUBSIZED
+    )
+
+    new DoubleStreamImpl(spl, _parallel, pipeline)
   }
 
   def sum(): scala.Double = {

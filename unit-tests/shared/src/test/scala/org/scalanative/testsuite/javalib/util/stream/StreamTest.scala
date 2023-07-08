@@ -92,6 +92,126 @@ class StreamTest {
     )
   }
 
+  @Test def streamParallel(): Unit = {
+    val nElements = 7
+    val sisters = new ArrayList[String](nElements)
+    sisters.add("Maya")
+    sisters.add("Electra")
+    sisters.add("Taygete")
+    sisters.add("Alcyone")
+    sisters.add("Celaeno")
+    sisters.add("Sterope")
+    sisters.add("Merope")
+
+    val sPar = sisters.parallelStream()
+
+    assertTrue(
+      "Expected parallel stream",
+      sPar.isParallel()
+    )
+
+    val expectedCharacteristics =
+      Spliterator.SIZED | Spliterator.SUBSIZED | Spliterator.ORDERED // 0x4050
+
+    val sParSpliterator = sPar.spliterator()
+    assertEquals(
+      "parallel characteristics",
+      expectedCharacteristics,
+      sParSpliterator.characteristics()
+    )
+
+    val sSeq = sisters.parallelStream().sequential()
+    assertFalse(
+      "Expected sequential stream",
+      sSeq.isParallel()
+    )
+
+    val sSeqSpliterator = sSeq.spliterator()
+
+    assertEquals(
+      "sequential characteristics",
+      expectedCharacteristics,
+      sSeqSpliterator.characteristics()
+    )
+
+    assertEquals(
+      "Unexpected sequential stream size",
+      nElements,
+      sSeqSpliterator.estimateSize()
+    )
+
+    // sequential stream has expected contents
+    var count = 0
+    sSeqSpliterator.forEachRemaining((e: String) => {
+      assertEquals(
+        s"sequential stream contents(${count})",
+        sisters.get(count),
+        e
+      )
+      count += 1
+    })
+  }
+
+  @Test def streamSequential(): Unit = {
+    val nElements = 7
+    val sisters = new ArrayList[String](nElements)
+    sisters.add("Maya")
+    sisters.add("Electra")
+    sisters.add("Taygete")
+    sisters.add("Alcyone")
+    sisters.add("Celaeno")
+    sisters.add("Sterope")
+    sisters.add("Merope")
+
+    val sSeq = sisters.stream()
+
+    assertFalse(
+      "Expected sequential stream",
+      sSeq.isParallel()
+    )
+
+    val expectedCharacteristics =
+      Spliterator.SIZED | Spliterator.SUBSIZED | Spliterator.ORDERED // 0x4050
+
+    val sSeqSpliterator = sSeq.spliterator()
+    assertEquals(
+      "sequential characteristics",
+      expectedCharacteristics,
+      sSeqSpliterator.characteristics()
+    )
+
+    val sPar = sisters.stream().parallel()
+    assertTrue(
+      "Expected parallel stream",
+      sPar.isParallel()
+    )
+
+    val sParSpliterator = sPar.spliterator()
+
+    assertEquals(
+      "parallel characteristics",
+      expectedCharacteristics,
+      sParSpliterator.characteristics()
+    )
+
+    assertEquals(
+      "Unexpected parallel stream size",
+      nElements,
+      sParSpliterator.estimateSize()
+    )
+
+    // parallel stream has expected contents
+    var count = 0
+    sParSpliterator.forEachRemaining((e: String) => {
+      assertEquals(
+        s"parallel stream contents(${count})",
+        sisters.get(count),
+        e
+      )
+      count += 1
+    })
+  }
+
 // Methods specified in interface Stream --------------------------------
 
   @Test def streamBuilderCanBuildAnEmptyStream(): Unit = {
@@ -1011,6 +1131,86 @@ class StreamTest {
       else "unexpected number of elements"
 
     assertEquals(msg, nElements, count)
+  }
+
+  @Test def streamSorted_Characteristics(): Unit = {
+    /* SN sequential, SN parallel, & JVM streams should all return the same
+     * characteristics both before (pre) and after (post) sorting.
+     *
+     * Test both sequential and parallel streams to verify this expectation.
+     * Testing 'sorted()' will call 'sorted(comparator)', so this one Test
+     * covers both methods.
+     */
+
+    val nElements = 8
+    val wild = new ArrayList[String](nElements)
+
+    // Ensure that the Elements are not inserted in sorted or reverse order.
+    wild.add("Dasher")
+    wild.add("Prancer")
+    wild.add("Vixen")
+    wild.add("Comet")
+    wild.add("Cupid")
+    wild.add("Donner")
+    wild.add("Blitzen")
+    wild.add("Rudolph")
+
+    val ordered = new ArrayList(wild)
+    ju.Collections.sort(ordered)
+
+    val seqStream = wild.stream()
+    assertFalse(
+      "Expected sequential stream",
+      seqStream.isParallel()
+    )
+
+    // same expected values for SN sequential, SN parallel, & JVM streams
+    val expectedPreCharacteristics =
+      Spliterator.SIZED | Spliterator.SUBSIZED | Spliterator.ORDERED // 0x4050
+
+    val expectedPostCharacteristics =
+      expectedPreCharacteristics + Spliterator.SORTED
+
+    val seqSpliter = seqStream.spliterator()
+
+    assertEquals(
+      "sequential characteristics",
+      expectedPreCharacteristics,
+      seqSpliter.characteristics()
+    )
+
+    val sortedSeqStream = wild.stream().sorted()
+    val sortedSeqSpliter = sortedSeqStream.spliterator()
+
+    assertEquals(
+      "sorted sequential characteristics",
+      expectedPostCharacteristics,
+      sortedSeqSpliter.characteristics()
+    )
+
+    val parStream = wild.stream().parallel()
+    assertFalse(
+      "Expected  parallel stream",
+      seqStream.isParallel()
+    )
+
+    val parSpliter = parStream.spliterator()
+
+    assertEquals(
+      "parallel characteristics",
+      expectedPreCharacteristics,
+      parSpliter.characteristics()
+    )
+
+    val sortedParStream = wild.stream().parallel().sorted()
+    val sortedParSpliter = sortedParStream.spliterator()
+
+    assertEquals(
+      "sorted parallel characteristics",
+      expectedPostCharacteristics,
+      sortedParSpliter.characteristics()
+    )
+
   }
 
   @Test def streamSorted_UsingComparator(): Unit = {
