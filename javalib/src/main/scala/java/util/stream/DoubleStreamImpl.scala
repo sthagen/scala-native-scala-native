@@ -80,7 +80,7 @@ private[stream] class DoubleStreamImpl(
 
   protected def commenceOperation(): Unit = {
     if (_operatedUpon || _closed)
-      ObjectStreamImpl.throwIllegalStateException()
+      StreamImpl.throwIllegalStateException()
 
     _operatedUpon = true
   }
@@ -132,7 +132,7 @@ private[stream] class DoubleStreamImpl(
     // JVM appears to not set "operated upon" here.
 
     if (_closed)
-      ObjectStreamImpl.throwIllegalStateException()
+      StreamImpl.throwIllegalStateException()
 
     // detects & throws on closeHandler == null
     onCloseQueue.addLast(closeHandler)
@@ -373,6 +373,14 @@ private[stream] class DoubleStreamImpl(
   }
 
   def limit(maxSize: Long): DoubleStream = {
+
+    /* Important:
+     * See Issue #3309 & StreamImpl#limit for discussion of size
+     * & characteristics in JVM 17 (and possibly as early as JVM 12)
+     * for parallel ORDERED streams.
+     * The behavior implemented here is Java 8 and at least Java 11.
+     */
+
     if (maxSize < 0)
       throw new IllegalArgumentException(maxSize.toString())
 
@@ -380,9 +388,17 @@ private[stream] class DoubleStreamImpl(
 
     var nSeen = 0L
 
+    val startingBits = _spliter.characteristics()
+
+    val alwaysClearedBits =
+      Spliterator.SIZED | Spliterator.SUBSIZED |
+        Spliterator.NONNULL | Spliterator.IMMUTABLE | Spliterator.CONCURRENT
+
+    val newStreamCharacteristics = startingBits & ~alwaysClearedBits
+
     val spl = new Spliterators.AbstractDoubleSpliterator(
-      maxSize,
-      _spliter.characteristics()
+      Long.MaxValue,
+      newStreamCharacteristics
     ) {
       def tryAdvance(action: DoubleConsumer): Boolean =
         if (nSeen >= maxSize) false
@@ -434,11 +450,11 @@ private[stream] class DoubleStreamImpl(
         _spliter.tryAdvance((e: scala.Double) => action.accept(mapper(e)))
     }
 
-    new ObjectStreamImpl[U](
+    new StreamImpl[U](
       spl,
       _parallel,
       pipeline
-        .asInstanceOf[ArrayDeque[ObjectStreamImpl[U]]]
+        .asInstanceOf[ArrayDeque[StreamImpl[U]]]
     )
   }
 
@@ -583,11 +599,18 @@ private[stream] class DoubleStreamImpl(
 
     Arrays.sort(buffer)
 
-    val spl = Spliterators.spliterator(
-      buffer,
+    val startingBits = _spliter.characteristics()
+    val alwaysSetBits =
       Spliterator.SORTED | Spliterator.ORDERED |
         Spliterator.SIZED | Spliterator.SUBSIZED
-    )
+
+    // Time & experience may show that additional bits need to be cleared here.
+    val alwaysClearedBits = Spliterator.IMMUTABLE
+
+    val newCharacteristics =
+      (startingBits | alwaysSetBits) & ~alwaysClearedBits
+
+    val spl = Spliterators.spliterator(buffer, newCharacteristics)
 
     new DoubleStreamImpl(spl, _parallel, pipeline)
   }
@@ -648,7 +671,7 @@ object DoubleStreamImpl {
     private var built = false
 
     override def accept(t: scala.Double): Unit =
-      if (built) ObjectStreamImpl.throwIllegalStateException()
+      if (built) StreamImpl.throwIllegalStateException()
       else buffer.add(t)
 
     override def build(): DoubleStream = {
@@ -820,7 +843,7 @@ object DoubleStreamImpl {
   }
 
   def concat(a: DoubleStream, b: DoubleStream): DoubleStream = {
-    /* See ""Design Note" at corresponding place in ObjectStreamImpl.
+    /* See ""Design Note" at corresponding place in StreamImpl.
      * This implementaton shares the same noted "features".
      */
     val aImpl = a.asInstanceOf[DoubleStreamImpl]
