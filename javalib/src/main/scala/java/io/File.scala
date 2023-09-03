@@ -7,7 +7,7 @@ import java.nio.file.WindowsException
 import java.util.ScalaOps._
 import java.util.WindowsHelperMethods._
 import scala.annotation.tailrec
-import scala.scalanative.annotation.{alwaysinline, stub}
+import scala.scalanative.annotation.alwaysinline
 import scala.scalanative.libc._
 import scala.scalanative.libc.stdio._
 import scala.scalanative.libc.stdlib._
@@ -552,8 +552,11 @@ class File(_path: String) extends Serializable with Comparable[File] {
   def listFiles(): Array[File] =
     listFiles(FilenameFilter.allPassFilter)
 
-  def listFiles(filter: FilenameFilter): Array[File] =
-    list(filter).map(new File(this, _))
+  def listFiles(filter: FilenameFilter): Array[File] = {
+    val files = list(filter)
+    if (files == null) null
+    else files.map(new File(this, _))
+  }
 
   def listFiles(filter: FileFilter): Array[File] = {
     val filenameFilter =
@@ -603,8 +606,7 @@ class File(_path: String) extends Serializable with Comparable[File] {
 
   def deleteOnExit(): Unit = DeleteOnExit.addFile(this.getAbsolutePath())
 
-  @stub
-  def toURL(): java.net.URL = ???
+  def toURL(): java.net.URL = toURI().toURL()
 
   // Ported from Apache Harmony
   def toURI(): URI = {

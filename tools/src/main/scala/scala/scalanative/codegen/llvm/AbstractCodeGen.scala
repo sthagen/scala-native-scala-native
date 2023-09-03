@@ -9,6 +9,7 @@ import scala.scalanative.codegen.llvm.compat.os.OsCompat
 import scala.scalanative.io.VirtualDirectory
 import scala.scalanative.nir.ControlFlow.{Block, Graph => CFG}
 import scala.scalanative.nir._
+import scala.scalanative.nir.Defn.Define.DebugInfo
 import scala.scalanative.util.ShowBuilder.FileShowBuilder
 import scala.scalanative.util.{ShowBuilder, unreachable, unsupported}
 import scala.scalanative.{build, linker, nir}
@@ -17,6 +18,11 @@ import scala.scalanative.codegen.{Metadata => CodeGenMetadata}
 
 import scala.language.implicitConversions
 import scala.scalanative.codegen.llvm.Metadata.conversions._
+import scala.scalanative.nir.Defn.Const
+import scala.scalanative.nir.Defn.Declare
+import scala.scalanative.nir.Defn.Var
+import scala.scalanative.nir.Defn.Define
+import scala.scalanative.nir.Defn.Trait
 
 private[codegen] abstract class AbstractCodeGen(
     env: Map[Global, Defn],
@@ -34,7 +40,7 @@ private[codegen] abstract class AbstractCodeGen(
   private var currentBlockSplit: Int = _
 
   private val copies = mutable.Map.empty[Local, nir.Val]
-  private val deps = mutable.Set.empty[Global]
+  private val deps = mutable.Set.empty[Global.Member]
   private val generated = mutable.Set.empty[String]
   private val externSigMembers = mutable.Map.empty[Sig, Global.Member]
 
@@ -95,7 +101,7 @@ private[codegen] abstract class AbstractCodeGen(
             defn.copy(attrs.copy(isExtern = true))
           case defn @ Defn.Declare(attrs, _, _) =>
             defn.copy(attrs.copy(isExtern = true))
-          case defn @ Defn.Define(attrs, name, ty, _) =>
+          case defn @ Defn.Define(attrs, name, ty, _, _) =>
             Defn.Declare(attrs, name, ty)
           case _ =>
             unreachable
@@ -128,20 +134,20 @@ private[codegen] abstract class AbstractCodeGen(
 
   }
 
-  protected final def touch(n: Global): Unit =
+  protected final def touch(n: Global.Member): Unit =
     deps += n
 
-  protected final def lookup(n: Global): Type = n match {
+  protected final def lookup(n: Global.Member): Type = n match {
     case Global.Member(Global.Top("__const"), _) =>
       constTy(n)
     case _ =>
       touch(n)
       env(n) match {
-        case Defn.Var(_, _, ty, _)     => ty
-        case Defn.Const(_, _, ty, _)   => ty
-        case Defn.Declare(_, _, sig)   => sig
-        case Defn.Define(_, _, sig, _) => sig
-        case _                         => unreachable
+        case Defn.Var(_, _, ty, _)        => ty
+        case Defn.Const(_, _, ty, _)      => ty
+        case Defn.Declare(_, _, sig)      => sig
+        case Defn.Define(_, _, sig, _, _) => sig
+        case _                            => unreachable
       }
   }
 
@@ -154,6 +160,11 @@ private[codegen] abstract class AbstractCodeGen(
       newline()
     }
     os.genPrelude()
+    if (config.debugMetadata) {
+      newline()
+      line("declare void @llvm.dbg.declare(metadata, metadata, metadata)")
+      line("declare void @llvm.dbg.value(metadata, metadata, metadata)")
+    }
   }
 
   private def genConsts()(implicit sb: ShowBuilder): Unit = {
@@ -177,9 +188,9 @@ private[codegen] abstract class AbstractCodeGen(
     case Defn.Const(attrs, name, ty, rhs) =>
       genGlobalDefn(attrs, name, isConst = true, ty, rhs)
     case Defn.Declare(attrs, name, sig) =>
-      genFunctionDefn(attrs, name, sig, Seq.empty, Fresh(), defn.pos)
-    case Defn.Define(attrs, name, sig, insts) =>
-      genFunctionDefn(attrs, name, sig, insts, Fresh(insts), defn.pos)
+      genFunctionDefn(defn, Seq.empty, Fresh(), DebugInfo.empty)
+    case Defn.Define(attrs, name, sig, insts, debugInfo) =>
+      genFunctionDefn(defn, insts, Fresh(insts), debugInfo)
     case defn =>
       unsupported(defn)
   }
@@ -206,19 +217,22 @@ private[codegen] abstract class AbstractCodeGen(
   }
 
   private[codegen] def genFunctionDefn(
-      attrs: Attrs,
-      name: Global,
-      sig: Type,
+      defn: nir.Defn,
       insts: Seq[Inst],
       fresh: Fresh,
-      pos: Position
+      debugInfo: DebugInfo
   )(implicit
       sb: ShowBuilder,
       metaCtx: MetadataCodeGen.Context
   ): Unit = {
     import sb._
+    import defn.{name, attrs, pos}
 
-    val Type.Function(argtys, retty) = sig: @unchecked
+    val Type.Function(argtys, retty) = defn match {
+      case defn: Declare => defn.ty
+      case defn: Define  => defn.ty
+      case _             => unreachable
+    }
 
     val isDecl = insts.isEmpty
 
@@ -252,36 +266,34 @@ private[codegen] abstract class AbstractCodeGen(
         genAttr(attrs.inlineHint)
       }
     }
-    if (!isDecl) {
-      str(" ")
-      str(os.gxxPersonality)
-    }
 
-    val debugInfo =
-      if (isDecl || !config.debugMetadata) None
-      else Option(toDISubprogram(attrs, name, retty, argtys, pos))
-    debugInfo.foreach(dbg(_))
-    if (!isDecl) {
-      str(" {")
+    defn match {
+      case _: nir.Defn.Declare => ()
+      case defn: nir.Defn.Define =>
+        implicit lazy val defnScopes: DefnScopes = new DefnScopes(defn)
+        str(" ")
+        str(os.gxxPersonality)
 
-      insts.foreach {
-        case Inst.Let(n, Op.Copy(v), _) =>
-          copies(n) = v
-        case _ =>
-          ()
-      }
+        dbg(defnScopes.getDISubprogramScope)
+        str(" {")
+        insts.foreach {
+          case Inst.Let(n, Op.Copy(v), _) => copies(n) = v
+          case _                          => ()
+        }
 
-      locally {
-        implicit val cfg: CFG = CFG(insts)
-        implicit val _fresh: Fresh = fresh
-        cfg.all.foreach(genBlock(_, scope = debugInfo))
-        cfg.all.foreach(genBlockLandingPads)
-        newline()
-      }
+        locally {
+          implicit val cfg: CFG = CFG(insts)
+          implicit val _fresh: Fresh = fresh
+          implicit val _debugInfo: DebugInfo = debugInfo
+          cfg.all.foreach(genBlock)
+          cfg.all.foreach(genBlockLandingPads)
+          newline()
+        }
 
-      str("}")
+        str("}")
 
-      copies.clear()
+        copies.clear()
+      case _ => unreachable
     }
   }
 
@@ -313,9 +325,9 @@ private[codegen] abstract class AbstractCodeGen(
   private[codegen] def toDereferenceable(
       refty: Type.RefKind
   ): (Boolean, String, Long) = {
-    val size = meta.linked.infos(refty.className) match {
+    val size = meta.analysis.infos(refty.className) match {
       case info: linker.Trait =>
-        meta.layout(meta.linked.ObjectClass).size
+        meta.layout(meta.analysis.ObjectClass).size
       case info: linker.Class =>
         meta.layout(info).size
       case _ =>
@@ -329,13 +341,12 @@ private[codegen] abstract class AbstractCodeGen(
     }
   }
 
-  private[codegen] def genBlock(
-      block: Block,
-      scope: Option[Metadata.Scope] = None
-  )(implicit
+  private[codegen] def genBlock(block: Block)(implicit
       cfg: CFG,
       fresh: Fresh,
       sb: ShowBuilder,
+      debugInfo: DebugInfo,
+      defnScopes: DefnScopes,
       metaCtx: MetadataCodeGen.Context
   ): Unit = {
     import sb._
@@ -347,7 +358,7 @@ private[codegen] abstract class AbstractCodeGen(
     indent()
     os.genBlockAlloca(block)
     genBlockPrologue(block)
-    rep(insts) { inst => genInst(inst, scope) }
+    rep(insts)(genInst)
     unindent()
   }
 
@@ -367,16 +378,23 @@ private[codegen] abstract class AbstractCodeGen(
 
   private[codegen] def genBlockPrologue(
       block: Block
-  )(implicit cfg: CFG, fresh: Fresh, sb: ShowBuilder): Unit = {
+  )(implicit
+      cfg: CFG,
+      fresh: Fresh,
+      sb: ShowBuilder,
+      debugInfo: DebugInfo,
+      metadataCtx: MetadataCodeGen.Context,
+      defnScopes: DefnScopes
+  ): Unit = {
     import sb._
+    val params = block.params.zipWithIndex
     if (!block.isEntry) {
-      val params = block.params
-      params.zipWithIndex.foreach {
-        case (Val.Local(name, Type.Unit), n) => () // skip
-        case (Val.Local(name, ty), n) =>
+      params.foreach {
+        case (Val.Local(_, Type.Unit), n) => () // skip
+        case (Val.Local(id, ty), n) =>
           newline()
           str("%")
-          genLocal(name)
+          genLocal(id)
           str(" = phi ")
           genType(ty)
           str(" ")
@@ -385,7 +403,7 @@ private[codegen] abstract class AbstractCodeGen(
               val Next.Label(_, vals) = next
               genJustVal(vals(n))
               str(", %")
-              genLocal(edge.from.name)
+              genLocal(edge.from.id)
               str(".")
               str(edge.from.splitCount)
             }
@@ -413,15 +431,32 @@ private[codegen] abstract class AbstractCodeGen(
           }
       }
     }
+    if (generateDebugMetadata) {
+      lazy val scopeId =
+        if (block.isEntry) nir.ScopeId.TopLevel
+        else
+          block.insts
+            .collectFirst { case let: Inst.Let => let.scopeId }
+            .getOrElse(nir.ScopeId.TopLevel)
+      params.foreach {
+        case (Val.Local(id, ty), idx) =>
+          // arg should be non-zero value
+          val argIdx = if (block.isEntry) Some(idx + 1) else None
+          dbgLocalValue(id, ty, argIdx)(
+            srcPosition = block.pos,
+            scopeId = scopeId
+          )
+      }
+    }
   }
 
-  private[codegen] def genBlockLandingPads(
-      block: Block
-  )(implicit
+  private[codegen] def genBlockLandingPads(block: Block)(implicit
       cfg: CFG,
       fresh: Fresh,
       sb: ShowBuilder,
-      metaCtx: MetadataCodeGen.Context
+      debugInfo: DebugInfo,
+      metaCtx: MetadataCodeGen.Context,
+      defnScoeps: this.DefnScopes
   ): Unit = {
     block.insts.foreach {
       case inst @ Inst.Let(_, _, unwind: Next.Unwind) =>
@@ -465,19 +500,18 @@ private[codegen] abstract class AbstractCodeGen(
     }
   }
 
-  private val constMap = mutable.Map.empty[Val, Global]
-  private val constTy = mutable.Map.empty[Global, Type]
-  private[codegen] def constFor(v: Val): Global =
-    if (constMap.contains(v)) {
-      constMap(v)
-    } else {
-      val idx = constMap.size
-      val name =
-        Global.Member(Global.Top("__const"), Sig.Generated(idx.toString))
-      constMap(v) = name
-      constTy(name) = v.ty
-      name
-    }
+  private val constMap = mutable.Map.empty[Val, Global.Member]
+  private val constTy = mutable.Map.empty[Global.Member, Type]
+  private[codegen] def constFor(v: Val): Global.Member =
+    constMap.getOrElseUpdate(
+      v, {
+        val idx = constMap.size
+        val name =
+          Global.Member(Global.Top("__const"), Sig.Generated(idx.toString))
+        constTy(name) = v.ty
+        name
+      }
+    )
   private[codegen] def deconstify(v: Val): Val = v match {
     case Val.Local(local, _) if copies.contains(local) =>
       deconstify(copies(local))
@@ -524,7 +558,7 @@ private[codegen] abstract class AbstractCodeGen(
       case Val.Local(n, ty) =>
         str("%")
         genLocal(n)
-      case Val.Global(n, ty) =>
+      case Val.Global(n: Global.Member, ty) =>
         if (useOpaquePointers) {
           lookup(n)
           str("@")
@@ -613,18 +647,17 @@ private[codegen] abstract class AbstractCodeGen(
     }
   }
 
-  private[codegen] def genInst(
-      inst: Inst,
-      scope: Option[Metadata.Scope] = None
-  )(implicit
+  private[codegen] def genInst(inst: Inst)(implicit
       fresh: Fresh,
       sb: ShowBuilder,
+      debugInfo: DebugInfo,
+      defnScopes: DefnScopes,
       metaCtx: MetadataCodeGen.Context
   ): Unit = {
     import sb._
     inst match {
       case inst: Inst.Let =>
-        genLet(inst, scope)
+        genLet(inst)
 
       case Inst.Unreachable(unwind) =>
         assert(unwind eq Next.None)
@@ -646,27 +679,27 @@ private[codegen] abstract class AbstractCodeGen(
       // select instruction.
       case Inst.If(
             cond,
-            thenNext @ Next.Label(thenName, thenArgs),
-            elseNext @ Next.Label(elseName, elseArgs)
-          ) if thenName == elseName =>
+            thenNext @ Next.Label(thenId, thenArgs),
+            elseNext @ Next.Label(elseId, elseArgs)
+          ) if thenId == elseId =>
         if (thenArgs == elseArgs) {
           genInst(Inst.Jump(thenNext)(inst.pos))
         } else {
           val args = thenArgs.zip(elseArgs).map {
             case (thenV, elseV) =>
-              val name = fresh()
+              val id = fresh()
               newline()
               str("%")
-              genLocal(name)
+              genLocal(id)
               str(" = select ")
               genVal(cond)
               str(", ")
               genVal(thenV)
               str(", ")
               genVal(elseV)
-              Val.Local(name, thenV.ty)
+              Val.Local(id, thenV.ty)
           }
-          genInst(Inst.Jump(Next.Label(thenName, args))(inst.pos))
+          genInst(Inst.Jump(Next.Label(thenId, args))(inst.pos))
         }
 
       case Inst.If(cond, thenp, elsep) =>
@@ -699,12 +732,11 @@ private[codegen] abstract class AbstractCodeGen(
     }
   }
 
-  private[codegen] def genLet(
-      inst: Inst.Let,
-      scope: Option[Metadata.Scope] = None
-  )(implicit
+  private[codegen] def genLet(inst: Inst.Let)(implicit
       fresh: Fresh,
       sb: ShowBuilder,
+      debugInfo: DebugInfo,
+      defnScopes: DefnScopes,
       metaCtx: MetadataCodeGen.Context
   ): Unit = {
     import sb._
@@ -712,13 +744,15 @@ private[codegen] abstract class AbstractCodeGen(
       ty == Type.Unit || ty == Type.Nothing
 
     val op = inst.op
-    val name = inst.name
+    val id = inst.id
     val unwind = inst.unwind
+    val ty = inst.op.resty
+    val scope = defnScopes.toDIScope(inst.scopeId)
 
     def genBind() =
-      if (!isVoid(op.resty)) {
+      if (!isVoid(ty)) {
         str("%")
-        genLocal(name)
+        genLocal(id)
         str(" = ")
       }
 
@@ -742,13 +776,8 @@ private[codegen] abstract class AbstractCodeGen(
             else call.copy(ptr = Val.Global(glob, valty))
           case _ => call
         }
-        genCall(
-          genBind,
-          callDef,
-          unwind,
-          if (inst.pos == Position.NoPosition) None else Some(inst.pos),
-          scope
-        )
+        genCall(genBind, callDef, unwind, inst.pos, inst.scopeId)
+        dbgLocalValue(id, ty)(inst.pos, inst.scopeId)
 
       case Op.Load(ty, ptr, syncAttrs) =>
         val pointee = fresh()
@@ -800,6 +829,7 @@ private[codegen] abstract class AbstractCodeGen(
             case _ =>
               ()
           }
+          dbgLocalValue(id, ty)(inst.pos, inst.scopeId)
         }
 
       case Op.Store(ty, ptr, value, syncAttrs) =>
@@ -888,6 +918,7 @@ private[codegen] abstract class AbstractCodeGen(
           genLocal(derived)
           str(" to i8*")
         }
+        dbgLocalValue(id, Type.Ptr)(inst.pos, inst.scopeId)
 
       case Op.Stackalloc(ty, n) =>
         val pointee = fresh()
@@ -915,24 +946,29 @@ private[codegen] abstract class AbstractCodeGen(
           genLocal(pointee)
           str(" to i8*")
         }
+        dbgLocalVariable(pointee, ty)(inst.pos, inst.scopeId)
 
       case _ =>
         newline()
         genBind()
         genOp(op)
+        dbgLocalValue(id, ty)(inst.pos, inst.scopeId)
+
     }
+
   }
 
   private[codegen] def genCall(
       genBind: () => Unit,
       call: Op.Call,
       unwind: Next,
-      pos: Option[Position],
-      scope: Option[Metadata.Scope]
+      srcPos: Position,
+      scopeId: ScopeId
   )(implicit
       fresh: Fresh,
       sb: ShowBuilder,
-      metaCtx: MetadataCodeGen.Context
+      metaCtx: MetadataCodeGen.Context,
+      defnScopes: DefnScopes
   ): Unit = {
     import sb._
 
@@ -940,13 +976,13 @@ private[codegen] abstract class AbstractCodeGen(
      *  situations where a null check is generated (and the function call is
      *  throwNullPointer) in this case we can only use NoPosition
      */
-    val dbgPosition = scope
-      .map(toDILocation(pos.getOrElse(Position.NoPosition), _))
-    def genDbgPosition() = dbgPosition.foreach(dbg(",", _))
+    val dbgPosition = toDILocation(srcPos, scopeId)
+    def genDbgPosition() = dbg(",", dbgPosition)
 
     call match {
-      case Op.Call(ty, Val.Global(pointee, _), args) if lookup(pointee) == ty =>
-        val Type.Function(argtys, _) = ty: @unchecked
+      case Op.Call(ty, Val.Global(pointee: Global.Member, _), args)
+          if lookup(pointee) == ty =>
+        val Type.Function(argtys, _) = ty
         touch(pointee)
 
         newline()
@@ -973,7 +1009,7 @@ private[codegen] abstract class AbstractCodeGen(
         }
 
       case Op.Call(ty, ptr, args) =>
-        val Type.Function(_, resty) = ty: @unchecked
+        val Type.Function(_, resty) = ty
 
         val pointee = fresh()
 
@@ -1145,7 +1181,7 @@ private[codegen] abstract class AbstractCodeGen(
       case Next.Case(v, next) =>
         genVal(v)
         str(", label %")
-        genLocal(next.name)
+        genLocal(next.id)
         str(".0")
       case Next.Unwind(Val.Local(exc, _), _) =>
         str("label %_")
@@ -1153,7 +1189,7 @@ private[codegen] abstract class AbstractCodeGen(
         str(".landingpad")
       case next =>
         str("label %")
-        genLocal(next.name)
+        genLocal(next.id)
         str(".0")
     }
   }

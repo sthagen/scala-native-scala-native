@@ -17,6 +17,7 @@ trait LinktimeValueResolver { self: Reach =>
     val conf = config.compilerConfig
     val triple = conf.configuredOrDetectedTriple
     val predefined: NativeConfig.LinktimeProperites = Map(
+      s"$linktimeInfo.hasDebugMetadata" -> conf.debugMetadata,
       s"$linktimeInfo.debugMode" -> (conf.mode == Mode.debug),
       s"$linktimeInfo.releaseMode" -> (conf.mode == Mode.releaseFast || conf.mode == Mode.releaseFull || conf.mode == Mode.releaseSize),
       s"$linktimeInfo.isMultithreadingEnabled" -> conf.multithreadingSupport,
@@ -88,7 +89,7 @@ trait LinktimeValueResolver { self: Reach =>
           case inst: Inst.LinktimeIf => resolveLinktimeIf(inst)
           case inst @ Inst.Let(_, ReferencedPropertyOp(propertyName), _) =>
             val resolvedVal = resolveLinktimeProperty(propertyName).nirValue
-            inst.copy(op = Op.Copy(resolvedVal))
+            inst.copy(op = Op.Copy(resolvedVal))(inst.pos, inst.scopeId)
           case inst => inst
         }
       }
@@ -114,15 +115,12 @@ trait LinktimeValueResolver { self: Reach =>
 
     def canBeEvauluated =
       !defn.insts.exists(isRuntimeOnly) && {
-        defn.ty match {
-          case Type.Function(_, retty) =>
-            retty match {
-              case _: Type.ValueKind    => true
-              case Type.Ref(name, _, _) => name == Rt.String.name
-              case Type.Null            => true
-              case _                    => false
-            }
-          case _ => false
+        val Type.Function(_, retty) = defn.ty
+        retty match {
+          case _: Type.ValueKind    => true
+          case Type.Ref(name, _, _) => name == Rt.String.name
+          case Type.Null            => true
+          case _                    => false
         }
       }
 
@@ -244,7 +242,7 @@ trait LinktimeValueResolver { self: Reach =>
           }
 
         case Inst.Jump(next) =>
-          val nextBlock = cf.find(next.name)
+          val nextBlock = cf.find(next.id)
           next match {
             case Next.Label(_, values) =>
               locals ++= nextBlock.params.zip(values).toMap

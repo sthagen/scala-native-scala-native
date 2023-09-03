@@ -19,6 +19,7 @@ object Metadata {
 
   sealed trait LLVMDebugInformation extends SpecializedNode
   sealed trait Scope extends LLVMDebugInformation
+
   case class DICompileUnit(
       file: DIFile,
       producer: String,
@@ -39,21 +40,37 @@ object Metadata {
     override def distinct: Boolean = true
   }
 
+  case class DILexicalBlock(scope: Scope, file: DIFile, line: Int, column: Int)
+      extends Scope {
+    override def distinct: Boolean = true
+  }
+
   case class DILocation(line: Int, column: Int, scope: Scope)
       extends LLVMDebugInformation
   case class DILocalVariable(
       name: String,
+      arg: Option[Int],
       scope: Scope,
       file: DIFile,
       line: Int,
       tpe: Type
   ) extends LLVMDebugInformation
 
+  // TOOD: actual DW_OP expressions as parameters
+  case class DIExpression() extends LLVMDebugInformation
+
   sealed trait Type extends LLVMDebugInformation
   case class DIBasicType(name: String, size: Int, align: Int, encoding: DW_ATE)
       extends Type
   case class DIDerivedType(tag: DWTag, baseType: Type, size: Int) extends Type
+
   case class DISubroutineType(types: DITypes) extends Type
+  case class DICompositeType(
+      tag: DWTag,
+      // TODO: name: String
+      size: Int,
+      elements: Tuple
+  ) extends Type
 
   class DITypes(retTpe: Option[Type], arguments: Seq[Type])
       extends Tuple(retTpe.getOrElse(Metadata.Const("null")) +: arguments)
@@ -65,6 +82,8 @@ object Metadata {
   sealed class DWTag(tag: Predef.String) extends Const(tag)
   object DWTag {
     object Pointer extends DWTag("DW_TAG_pointer_type")
+    object StructureType extends DWTag("DW_TAG_structure_type")
+    object Member extends DWTag("DW_TAG_member")
   }
 
   sealed class DW_ATE(tag: Predef.String) extends Const(tag)
