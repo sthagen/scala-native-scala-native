@@ -58,8 +58,22 @@ jobs:
           sbt \
           "-J-Xmx3G" \
           "scalaPartestTests${{env.project-version}}/testOnly -- --showDiff neg/abstract.scala pos/abstract.scala run/Course-2002-01.scala"
+  
+  tests-compile-scala3PublishVersion:
+    name: Compile sources with the Scala 3 version used for publishing artifacts
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/linux-setup-env
+        with:
+          scala-version: ${{matrix.scala}}
+          java-version: 8
 
-  test-compiler-plugins:
+      - name: Compile everything
+        run: sbt "++3.1.3; Test/compile"
+
+    
+  test-scala-cross-build:
     runs-on: ubuntu-20.04
     env:
       ENABLE_EXPERIMENTAL_COMPILER: true
@@ -76,7 +90,11 @@ jobs:
           java-version: 8
 
       - name: Test cross compilation of compiler plugins
-        run: sbt "+nscplugin${{env.project-version}}/compile; +junitPlugin${{env.project-version}}/compile" "-J-Xmx3G"
+        run: |
+          sbt "-J-Xmx3G"
+            +nscplugin${{ env.project-version }}/test
+            +junitPlugin${{ env.project-version }}/compile
+            +scalalib${{ env.project-version }}/compile
 
   test-runtime:
     name: Test runtime
