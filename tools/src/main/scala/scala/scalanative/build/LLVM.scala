@@ -203,11 +203,13 @@ private[scalanative] object LLVM {
       platformsLinks ++ srclinks ++ gclinks
     }
     val linkopts = config.linkingOptions ++ links.map("-l" + _)
+
     val flags = {
       val debugFlags =
         if (config.compilerConfig.debugMetadata || config.targetsWindows)
           Seq("-g")
         else Nil
+
       val platformFlags =
         if (!config.targetsWindows) Nil
         else {
@@ -221,8 +223,23 @@ private[scalanative] object LLVM {
           }
           ltoSupport
         }
+
+      // This is to ensure that the load path of the resulting dynamic library
+      // only contains the library filename, instead of the full path
+      // (i.e. in the target folder of SBT build) - this would make the library
+      // non-portable
+      val linkNameFlags =
+        if (config.compilerConfig.buildTarget == BuildTarget.LibraryDynamic)
+          if (config.targetsLinux)
+            List(s"-Wl,-soname,${config.artifactName}")
+          else if (config.targetsMac)
+            List(s"-Wl,-install_name,${config.artifactName}")
+          else Nil
+        else Nil
+
       val output = Seq("-o", config.buildPath.abs)
-      buildTargetLinkOpts ++ flto ++ debugFlags ++ platformFlags ++ output ++ asan ++ target
+
+      buildTargetLinkOpts ++ flto ++ debugFlags ++ platformFlags ++ linkNameFlags ++ output ++ asan ++ target
     }
     val paths = objectsPaths.map(_.abs)
     // it's a fix for passing too many file paths to the clang compiler,
@@ -252,12 +269,14 @@ private[scalanative] object LLVM {
       objectPaths: Seq[Path]
   )(implicit config: Config) = {
     val workDir = config.workDir
-    val llvmAR = Discover.discover("llvm-ar", "LLVM_BIN")
-    val MIRScriptFile = workDir.resolve("MIRScript").toFile
-    val pw = new PrintWriter(MIRScriptFile)
-    try {
-      pw.println(s"CREATE ${escapeWhitespaces(config.buildPath.abs)}")
-      objectPaths.foreach { path =>
+
+    val MRICompatibleAR =
+      Discover.tryDiscover("llvm-ar", "LLVM_BIN").toOption orElse
+        // MacOS ar command does not support -M flag...
+        Discover.tryDiscover("ar").toOption.filter(_ => config.targetsLinux)
+
+    def stageFiles(): Seq[String] = {
+      objectPaths.map { path =>
         val uniqueName =
           workDir
             .relativize(path)
@@ -265,16 +284,36 @@ private[scalanative] object LLVM {
             .replace(File.separator, "_")
         val newPath = workDir.resolve(uniqueName)
         Files.move(path, newPath, StandardCopyOption.REPLACE_EXISTING)
-        pw.println(s"ADDMOD ${escapeWhitespaces(newPath.abs)}")
+        newPath.abs
       }
-      pw.println("SAVE")
-      pw.println("END")
-    } finally pw.close()
+    }
 
-    val command = Seq(llvmAR.abs, "-M")
-    config.logger.running(command)
+    def useMRIScript(ar: Path) = {
+      val MIRScriptFile = workDir.resolve("MIRScript").toFile
+      val pw = new PrintWriter(MIRScriptFile)
+      try {
+        pw.println(s"CREATE ${escapeWhitespaces(config.buildPath.abs)}")
+        stageFiles().foreach { path =>
+          pw.println(s"ADDMOD ${escapeWhitespaces(path)}")
+        }
+        pw.println("SAVE")
+        pw.println("END")
+      } finally pw.close()
 
-    Process(command, config.workDir.toFile()) #< MIRScriptFile
+      val command = Seq(ar.abs, "-M")
+      config.logger.running(command)
+
+      Process(command, config.workDir.toFile()) #< MIRScriptFile
+    }
+
+    MRICompatibleAR match {
+      case None =>
+        val ar = Discover.discover("ar")
+        val command = Seq(ar.abs, "rc", config.buildPath.abs) ++ stageFiles()
+        config.logger.running(command)
+        Process(command, config.workDir.toFile())
+      case Some(path) => useMRIScript(path)
+    }
   }
 
   /** Checks the input timestamp to see if the file needs compiling. The call to
