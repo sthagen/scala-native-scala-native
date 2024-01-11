@@ -22,9 +22,9 @@ import core._
 import dotty.tools.FatalError
 import dotty.tools.dotc.report
 import dotty.tools.dotc.transform
-import transform.SymUtils._
 import transform.{ValueClasses, Erasure}
 import dotty.tools.backend.jvm.DottyBackendInterface.symExtensions
+import scala.scalanative.nscplugin.CompilerCompat.SymUtilsCompat.*
 
 import scala.scalanative.nir.Defn.Define.DebugInfo
 import scala.scalanative.util.ScopedVar.scoped
@@ -1611,9 +1611,9 @@ trait NirGenExpr(using Context) {
           (sym == defn.ObjectClass) ||
           (sym == defn.JavaSerializableClass) ||
           (sym == defn.ComparableClass) ||
-          (sym derivesFrom defn.BoxedNumberClass) ||
-          (sym derivesFrom defn.BoxedCharClass) ||
-          (sym derivesFrom defn.BoxedBooleanClass)
+          (sym.derivesFrom(defn.BoxedNumberClass)) ||
+          (sym.derivesFrom(defn.BoxedCharClass)) ||
+          (sym.derivesFrom(defn.BoxedBooleanClass))
         }
         usesOnlyScalaTrees && !areSameFinals &&
           isMaybeBoxed(l.tpe.typeSymbol) &&

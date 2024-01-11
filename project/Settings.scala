@@ -71,7 +71,8 @@ object Settings {
     ),
     javaReleaseSettings,
     mimaSettings,
-    docsSettings
+    docsSettings,
+    scalacOptions ++= ignoredScalaDeprecations(scalaVersion.value)
   )
 
   val javacSourceFlags = Seq("-source", "1.8")
@@ -618,6 +619,35 @@ object Settings {
       publishSettings(None),
       javacOptions ++= Seq("-encoding", "utf8")
     )
+
+  def ignoredScalaDeprecations(scalaVersion: String): Seq[String] = {
+    def scala213StdLibDeprecations = Seq(
+      // In 2.13 lineStream_! was replaced with lazyList_!.
+      "method lineStream_!",
+      // OpenHashMap is used with value class parameter type, we cannot replace it with AnyRefMap or LongMap
+      // Should not be replaced with HashMap due to performance reasons.
+      "class|object OpenHashMap",
+      "class Stream",
+      "method retain in trait SetOps"
+    ).map(msg => s"-Wconf:cat=deprecation&msg=$msg:s")
+
+    def scala3Deprecations = Seq(
+      "`= _` has been deprecated",
+      "`_` is deprecated for wildcard arguments of types",
+      // -Wconf msg string cannot contain ':' character, it cannot be escaped
+      /*The syntax `x: _* is */ "no longer supported for vararg splice",
+      "The syntax `<function> _` is no longer supported",
+      "with as a type operator has been deprecated"
+    ).map(msg => s"-Wconf:msg=$msg:s")
+
+    CrossVersion
+      .partialVersion(scalaVersion)
+      .fold(Seq.empty[String]) {
+        case (2, 12) => Nil
+        case (2, 13) => scala213StdLibDeprecations
+        case (3, _)  => scala213StdLibDeprecations ++ scala3Deprecations
+      }
+  }
 
   lazy val recompileAllOrNothingSettings = Def.settings(
     /* Recompile all sources when at least 1/10,000 of the source files have
