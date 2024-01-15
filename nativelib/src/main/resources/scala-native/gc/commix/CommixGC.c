@@ -90,13 +90,7 @@ INLINE void *scalanative_GC_alloc_atomic(void *info, size_t size) {
     return scalanative_GC_alloc(info, size);
 }
 
-INLINE void scalanative_GC_collect() {
-    // Wait until sweeping will end, otherwise we risk segmentation
-    // fault or failing an assertion.
-    while (!Sweeper_IsSweepDone(&heap))
-        thread_yield();
-    Heap_Collect(&heap);
-}
+INLINE void scalanative_GC_collect() { Heap_Collect(&heap); }
 
 INLINE void scalanative_GC_register_weak_reference_handler(void *handler) {
     WeakRefGreyList_SetHandler(handler);
@@ -128,7 +122,6 @@ void scalanative_GC_remove_roots(void *addr_low, void *addr_high) {
     GC_Roots_RemoveByRange(customRoots, range);
 }
 
-#ifdef SCALANATIVE_MULTITHREADING_ENABLED
 typedef void *RoutineArgs;
 typedef struct {
     ThreadStartRoutine fn;
@@ -183,8 +176,10 @@ void scalanative_GC_set_mutator_thread_state(GC_MutatorThreadState state) {
     MutatorThread_switchState(currentMutatorThread, state);
 }
 void scalanative_GC_yield() {
+#ifdef SCALANATIVE_MULTITHREADING_ENABLED
     if (atomic_load_explicit(&Synchronizer_stopThreads, memory_order_relaxed))
         Synchronizer_yield();
-}
-#endif // SCALANATIVE_MULTITHREADING_ENABLED
 #endif
+}
+
+#endif // defined(SCALANATIVE_GC_COMMIX)
