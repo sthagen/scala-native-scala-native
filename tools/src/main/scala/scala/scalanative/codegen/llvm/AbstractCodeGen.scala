@@ -28,7 +28,6 @@ private[codegen] abstract class AbstractCodeGen(
   import meta.config
   import platform._
 
-  val os: OsCompat
   val pointerType = if (useOpaquePointers) "ptr" else "i8*"
 
   private var currentBlockName: nir.Local = _
@@ -38,6 +37,12 @@ private[codegen] abstract class AbstractCodeGen(
   private val deps = mutable.Set.empty[nir.Global.Member]
   private val generated = mutable.Set.empty[String]
   private val externSigMembers = mutable.Map.empty[nir.Sig, nir.Global.Member]
+
+  final val os: OsCompat = {
+    import scala.scalanative.codegen.llvm.compat.os._
+    if (meta.platform.targetsWindows) new WindowsCompat(this)
+    else new UnixCompat(this)
+  }
 
   def gen(id: String, dir: VirtualDirectory): Path = {
     val body = Paths.get(s"$id-body.ll")
@@ -970,7 +975,7 @@ private[codegen] abstract class AbstractCodeGen(
       genBind: () => Unit,
       call: nir.Op.Call,
       unwind: nir.Next,
-      srcPos: nir.Position,
+      srcPos: nir.SourcePosition,
       scopeId: nir.ScopeId
   )(implicit
       fresh: nir.Fresh,
