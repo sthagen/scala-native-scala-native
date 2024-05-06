@@ -791,15 +791,29 @@ class FilesTest {
       assertTrue("a3", Files.exists(f1) && Files.isRegularFile(f1))
       assertTrue("a4", Files.exists(f2) && Files.isRegularFile(f2))
 
-      val it = Files.list(dir).iterator()
-      val files = scala.collection.mutable.Set.empty[Path]
-      while (it.hasNext()) {
-        files += it.next()
-      }
-      assertTrue("a5", files.size == 3)
-      assertTrue("a6", files contains d0)
-      assertTrue("a7", files contains f0)
-      assertTrue("a8", files contains f1)
+      val fileStream = Files.list(dir)
+      try {
+        val it = fileStream.iterator()
+
+        val files = new java.util.HashSet[Path]()
+        while (it.hasNext())
+          files.add(it.next())
+
+        assertEquals("file count", 3, files.size)
+
+        assertTrue(
+          s"entry not found in stream: '${d0.toString()}'",
+          files.contains(d0)
+        )
+        assertTrue(
+          s"entry not found in stream: '${f0.toString()}'",
+          files.contains(f0)
+        )
+        assertTrue(
+          s"entry not found in stream '{f1.toString()}'",
+          files.contains(f1)
+        )
+      } finally fileStream.close()
     }
   }
 
@@ -1743,13 +1757,23 @@ class FilesTest {
     }
   }
 
-  def moveDirectoryTest(delete: Boolean, options: CopyOption*): Unit = {
+  def moveDirectoryTest(
+      delete: Boolean,
+      populateTarget: Boolean,
+      options: CopyOption*
+  ): Unit = {
     withTemporaryDirectory { dirFile =>
       val dir = dirFile.toPath()
       val f0 = dir.resolve("f0")
       Files.write(f0, "foo\n".getBytes)
       val target = Files.createTempDirectory(null)
-      if (delete) assertTrue(Files.deleteIfExists(target))
+
+      if (delete) {
+        assertTrue(Files.deleteIfExists(target))
+      } else if (populateTarget) {
+        Files.createFile(target.resolve("ergoSum"))
+      }
+
       Files.move(dir, target, options: _*)
       assertFalse("a1", Files.exists(dir))
       assertFalse("a2", Files.exists(f0))
@@ -1763,17 +1787,24 @@ class FilesTest {
     }
   }
   @Test def filesMoveDirectory(): Unit = {
-    moveDirectoryTest(delete = true)
+    moveDirectoryTest(delete = true, populateTarget = false)
   }
 
   @Test def filesMoveReplaceDirectory(): Unit = {
-    moveDirectoryTest(delete = false, REPLACE_EXISTING)
+    moveDirectoryTest(delete = false, populateTarget = false, REPLACE_EXISTING)
+  }
+
+  @Test def filesMoveReplaceDoesNotReplacePopulatedDirectory(): Unit = {
+    assertThrows(
+      classOf[DirectoryNotEmptyException],
+      moveDirectoryTest(delete = false, populateTarget = true, REPLACE_EXISTING)
+    )
   }
 
   @Test def filesMoveDoesNotReplaceDirectory(): Unit = {
     assertThrows(
       classOf[FileAlreadyExistsException],
-      moveDirectoryTest(delete = false)
+      moveDirectoryTest(delete = false, populateTarget = false)
     )
   }
 
