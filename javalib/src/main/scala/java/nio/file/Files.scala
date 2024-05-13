@@ -92,16 +92,15 @@ object Files {
       else classOf[PosixFileAttributes]
 
     val attrs = Files.readAttributes(source, attrsCls, linkOpts)
-    if (attrs.isSymbolicLink())
-      throw new IOException(
-        s"Unsupported operation: copy symbolic link $source to $target"
-      )
-
     val targetExists = exists(target, linkOpts)
     if (targetExists && !options.contains(REPLACE_EXISTING))
       throw new FileAlreadyExistsException(target.toString)
 
-    if (isDirectory(source, Array.empty)) {
+    if (attrs.isSymbolicLink() &&
+        options.contains(LinkOption.NOFOLLOW_LINKS)) {
+      if (targetExists) Files.delete(target)
+      createSymbolicLink(target, source, Array.empty)
+    } else if (isDirectory(source, Array.empty)) {
       createDirectory(target, Array.empty)
     } else {
       val in = newInputStream(source, Array.empty)
@@ -138,17 +137,8 @@ object Files {
     target
   }
 
-  private def copy(in: InputStream, out: OutputStream): Long = {
-    var written: Long = 0L
-    var value: Int = 0
-
-    while ({ value = in.read(); value != -1 }) {
-      out.write(value)
-      written += 1
-    }
-
-    written
-  }
+  private def copy(in: InputStream, out: OutputStream): Long =
+    in.transferTo(out)
 
   def createDirectories(dir: Path, attrs: Array[FileAttribute[_]]): Path =
     if (exists(dir, Array.empty) && !isDirectory(dir, Array.empty))
@@ -240,8 +230,9 @@ object Files {
         val targetFilename = toCWideStringUTF16LE(target.toString())
         val linkFilename = toCWideStringUTF16LE(link.toString())
         val flags =
-          if (target.toFile().isFile()) SYMBOLIC_LINK_FLAG_FILE
-          else SYMBOLIC_LINK_FLAG_DIRECTORY
+          if (isDirectory(target, Array(LinkOption.NOFOLLOW_LINKS)))
+            SYMBOLIC_LINK_FLAG_DIRECTORY
+          else SYMBOLIC_LINK_FLAG_FILE
         val created =
           CreateSymbolicLinkW(
             symlinkFileName = linkFilename,
@@ -264,9 +255,25 @@ object Files {
           }
         } else created
       } else {
-        val targetFilename = toCString(target.toString())
-        val linkFilename = toCString(link.toString())
-        unistd.symlink(targetFilename, linkFilename) == 0
+        val targetFilename = toCString(target.toAbsolutePath().toString())
+        val linkFilename = toCString(link.toAbsolutePath().toString())
+        if (link.getNameCount() == 1)
+          unistd.symlink(targetFilename, linkFilename) == 0
+        else {
+          val parentDir = link.toAbsolutePath().getParent()
+          createDirectories(parentDir, Array.empty)
+          val dirFD =
+            fcntl.open(toCString(parentDir.toString()), fcntl.O_RDONLY)
+          dirFD > 0 && {
+            try
+              unistd.symlinkat(
+                targetFilename,
+                dirFD,
+                toCString(link.getFileName().toString())
+              ) == 0
+            finally unistd.close(dirFD)
+          }
+        }
       }
     }
 
@@ -1002,7 +1009,9 @@ object Files {
           }
           fromCString(buf)
         }
-        Paths.get(name, Array.empty)
+        val target = Paths.get(name, Array.empty)
+        if (Files.isSymbolicLink(target)) readSymbolicLink(target)
+        else target
       }
 
   def setAttribute(
