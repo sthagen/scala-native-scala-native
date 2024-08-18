@@ -47,7 +47,8 @@ object LinktimeInfo {
 
   @resolvedAtLinktime()
   def isContinuationsSupported: Boolean =
-    isLinux || isMac || isFreeBSD || isOpenBSD || isNetBSD
+    (isLinux || isMac || isFreeBSD || isOpenBSD || isNetBSD) &&
+      (target.arch != "arm" && !is32BitPlatform)
 
   @resolvedAtLinktime(
     "scala.scalanative.meta.linktimeinfo.isMultithreadingEnabled"
@@ -59,6 +60,11 @@ object LinktimeInfo {
     "scala.scalanative.meta.linktimeinfo.contendedPaddingWidth"
   )
   def contendedPaddingWidth: Int = resolved
+
+  @resolvedAtLinktime(
+    "scala.scalanative.meta.linktimeinfo.runtimeVersion"
+  )
+  def runtimeVersion: String = resolved
 
   object target {
     @resolvedAtLinktime("scala.scalanative.meta.linktimeinfo.target.arch")

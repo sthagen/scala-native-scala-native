@@ -28,13 +28,17 @@ bool Heap_isGrowingPossible(Heap *heap, uint32_t incrementInBlocks) {
 }
 
 size_t Heap_getMemoryLimit() {
-    size_t memorySize = getMemorySize();
+    size_t memorySize = getFreeMemorySize();
+    if (memorySize == 0)
+        memorySize = getMemorySize();
     if ((uint64_t)memorySize > MAX_HEAP_SIZE) {
         return (size_t)MAX_HEAP_SIZE;
     } else {
         return memorySize;
     }
 }
+
+size_t Heap_getMemoryUsed(Heap *heap) { return heap->heapSize; }
 
 /**
  * Maps `MAX_SIZE` of memory and returns the first address aligned on
