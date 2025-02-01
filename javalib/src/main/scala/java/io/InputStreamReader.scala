@@ -20,8 +20,7 @@ class InputStreamReader(
    *  Class invariant: contains bytes already read from `in` but not yet
    *  decoded.
    */
-  private var inBuf: ByteBuffer = ByteBuffer.allocate(4096)
-  inBuf.limit(0)
+  private var inBuf: ByteBuffer = ByteBuffer.allocate(4096).limit(0)
 
   /** Tells whether the end of the underlying input stream has been reached.
    *  Class invariant: if true, then `in.read()` has returned -1.
@@ -120,22 +119,28 @@ class InputStreamReader(
       off: Int,
       len: Int
   ): Int = {
-    // Return outBuf to its full capacity
-    outBuf.limit(outBuf.capacity())
-    outBuf.position(0)
+    // Pre-condition: called only when outBuf.hasRemaining() == 0
 
     @tailrec // but not inline, this is not a common path
     def loopWithOutBuf(desiredOutBufSize: Int): Int = {
-      if (outBuf.capacity() < desiredOutBufSize)
+      if (outBuf.capacity() >= desiredOutBufSize) {
+        outBuf.clear() // Return outBuf to its full capacity & reuse
+      } else {
+        // probably first use of outBuf
         outBuf = CharBuffer.allocate(desiredOutBufSize)
+      }
+
       val charsRead = readImpl(outBuf)
-      if (charsRead == InputStreamReader.Overflow)
-        loopWithOutBuf(desiredOutBufSize * 2)
-      else
+
+      if (charsRead != InputStreamReader.Overflow) {
         charsRead
+      } else {
+        // Should never happen but be robust, multiply by 1.5 & try again.
+        loopWithOutBuf((desiredOutBufSize * 3) >> 1)
+      }
     }
 
-    val charsRead = loopWithOutBuf(2 * len)
+    val charsRead = loopWithOutBuf(len)
     assert(charsRead != 0) // can be -1, though
     outBuf.flip()
 
@@ -173,10 +178,13 @@ class InputStreamReader(
         // Flush
         if (decoder.flush(out).isOverflow()) {
           InputStreamReader.Overflow
+        } else if (out.position() != initPos) {
+          out.position() - initPos
         } else {
-          // Done
-          if (out.position() == initPos) -1
-          else out.position() - initPos
+          // End-of-File for now; prepare for any subsequent reads after EOF
+          endOfInput = false
+          decoder.reset()
+          -1
         }
       } else {
         // We need to read more from the underlying input stream
