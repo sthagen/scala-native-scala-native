@@ -9,6 +9,8 @@ import com.jsuereth.sbtpgp.PgpKeys.publishSigned
 import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport._
 import org.portablescala.sbtplatformdeps.PlatformDepsPlugin.autoImport._
 
+// Hack warning: special object mimicking build-info plugin outputs, defined in project/ScalaNativeBuildInfo
+import scala.scalanative.buildinfo.ScalaNativeBuildInfo
 import sbtbuildinfo.BuildInfoPlugin.autoImport._
 import ScriptedPlugin.autoImport._
 import com.jsuereth.sbtpgp.PgpKeys
@@ -35,6 +37,8 @@ object Settings {
 
   // JDK version we are running with
   lazy val thisBuildSettings = Def.settings(
+    organization := "org.scala-native",
+    version := ScalaNativeBuildInfo.version,
     Global / javaVersion := {
       val fullVersion = System.getProperty("java.version")
       val v = fullVersion.stripPrefix("1.").takeWhile(_.isDigit).toInt
@@ -73,9 +77,7 @@ object Settings {
   }
 
   lazy val commonSettings = Def.settings(
-    organization := "org.scala-native",
     name := projectName(thisProject.value.id),
-    version := nativeVersion,
     scalacOptions ++= Seq(
       "-deprecation",
       "-unchecked",
@@ -717,7 +719,10 @@ object Settings {
 
   def commonScalalibSettings(libraryName: String): Seq[Setting[_]] = {
     Def.settings(
-      version := scalalibVersion(scalaVersion.value, nativeVersion),
+      version := scalalibVersion(
+        scalaVersion.value,
+        (ThisBuild / version).value
+      ),
       mavenPublishSettings,
       disabledDocsSettings,
       recompileAllOrNothingSettings,

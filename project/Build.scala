@@ -213,28 +213,22 @@ object Build {
       )
 
   lazy val nir = MultiScalaProject("nir", file("nir/native"))
-    .settings(
-      toolSettings,
-      withSharedCrossPlatformSources
-    )
     .mapBinaryVersions {
       // Scaladoc for Scala 2.12 is not compliant with normal compiler (see nscPlugin)
       case "2.12" => _.settings(disabledDocsSettings)
       case _      => identity
     }
     .withNativeCompilerPlugin
+    .withCommonTools
     .withJUnitPlugin
     .dependsOn(util)
     .dependsOn(testInterface % "test", junitRuntime % "test")
 
   lazy val nirJVM = MultiScalaProject("nirJVM", "nir", file("nir/jvm"))
     .settings(
-      toolSettings,
-      withSharedCrossPlatformSources
-    )
-    .settings(
       libraryDependencies ++= Deps.JUnitJvm
     )
+    .withCommonTools
     .mapBinaryVersions {
       // Scaladoc for Scala 2.12 is not compliant with normal compiler (see nscPlugin)
       case "2.12" => _.settings(disabledDocsSettings)
@@ -516,7 +510,7 @@ object Build {
       )
       .withNativeCompilerPlugin
       .mapBinaryVersions {
-        case version @ ("2.12" | "2.13") =>
+        case "2.12" | "2.13" =>
           _.settings(
             commonScalalibSettings("scala-library"),
             scalacOptions ++= Seq(
@@ -540,19 +534,23 @@ object Build {
               }
             }
           )
-        case version @ ("3" | "3-next") =>
+        case "3" | "3-next" =>
           _.settings(
             name := "scala3lib",
             commonScalalibSettings("scala3-library_3"),
             scalacOptions ++= Seq(
               "-language:implicitConversions"
             ),
-            libraryDependencies += ("org.scala-native" %%% "scalalib" % scalalibVersion(
-              ScalaVersions.scala213,
-              nativeVersion
-            ))
-              .excludeAll(ExclusionRule("org.scala-native"))
-              .cross(CrossVersion.for3Use2_13),
+            libraryDependencies += {
+              val org = (ThisBuild / organization).value
+              val ver = scalalibVersion(
+                ScalaVersions.scala213,
+                (ThisBuild / version).value
+              )
+              (org %%% "scalalib" % ver)
+                .excludeAll(ExclusionRule(org))
+                .cross(CrossVersion.for3Use2_13)
+            },
             update := {
               update.dependsOn {
                 Def.taskDyn(scalalib.v2_13 / Compile / publishLocal)
