@@ -10,7 +10,7 @@ import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport._
 import org.portablescala.sbtplatformdeps.PlatformDepsPlugin.autoImport._
 
 // Hack warning: special object mimicking build-info plugin outputs, defined in project/ScalaNativeBuildInfo
-import scala.scalanative.buildinfo.ScalaNativeBuildInfo
+import scala.scalanative.ScalaNativeBuildInfo
 import sbtbuildinfo.BuildInfoPlugin.autoImport._
 import ScriptedPlugin.autoImport._
 import com.jsuereth.sbtpgp.PgpKeys
@@ -111,23 +111,24 @@ object Settings {
     def canUseRelease(scalaVersion: String) = CrossVersion
       .partialVersion(scalaVersion)
       .fold(false) {
+        case (2, 12) => patchVersion("2.12.", scalaVersion) > 16
         case (2, 13) => patchVersion("2.13.", scalaVersion) > 8
-        case (2, _)  => false
-        case (3, 1)  => patchVersion("3.1.", scalaVersion) > 1
-        case (3, _)  => true
+        case (3, _)  => true // since 3.1.2
       }
 
     Def.settings(
       Compile / scalacOptions += {
         val jdkVersion = targetJDKVersion(scalaVersion.value)
         if (canUseRelease(scalaVersion.value)) s"-release:$jdkVersion"
-        else if (scalaVersion.value.startsWith("3.")) s"-Xtarget:$jdkVersion"
         else s"-target:jvm-${targetJDKVersionString(jdkVersion)}"
       },
       Compile / javacOptions ++= {
         val jdkVersion = targetJDKVersion(scalaVersion.value)
         if (canUseRelease(scalaVersion.value)) Nil
-        else List(s"-source", targetJDKVersionString(jdkVersion))
+        else {
+          val version = targetJDKVersionString(jdkVersion)
+          List("-source", version, "-target", version)
+        }
       },
       noJavaReleaseSettings(Test)
     )
@@ -339,17 +340,6 @@ object Settings {
     publish := {},
     publishLocal := {},
     publish / skip := true
-  )
-
-  // Build Info
-  lazy val buildInfoJVMSettings = Def.settings(
-    buildInfoPackage := "scala.scalanative.buildinfo",
-    buildInfoObject := "ScalaNativeBuildInfo",
-    buildInfoKeys := Seq[BuildInfoKey](
-      version,
-      sbtVersion,
-      scalaVersion
-    )
   )
 
   // Tests
