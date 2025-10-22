@@ -367,14 +367,14 @@ private[process] object UnixProcessGen2 {
 
     val dir = builder.directory()
     if ((dir != null) && (dir.toString != ".")) {
-      forkChild(builder)
+      forkChild(builder)(new UnixProcessHandleGen2(_, _))
     } else {
       spawnChild(builder)
     }
   }
 
-  private def forkChild(
-      builder: ProcessBuilder
+  def forkChild(builder: ProcessBuilder)(
+      f: (Int, ProcessBuilder) => UnixProcessHandle
   )(implicit z: Zone): GenericProcess = {
     val infds: Ptr[CInt] = stackalloc[CInt](2)
     val outfds: Ptr[CInt] = stackalloc[CInt](2)
@@ -391,16 +391,7 @@ private[process] object UnixProcessGen2 {
     val binaries = binaryPaths(builder.environment(), cmd.get(0))
     val dir = builder.directory()
     val argv = nullTerminate(cmd)
-    val envp = nullTerminate {
-      val list = new ArrayList[String]
-      builder
-        .environment()
-        .entrySet()
-        .iterator()
-        .scalaOps
-        .foreach(e => list.add(s"${e.getKey()}=${e.getValue()}"))
-      list
-    }
+    val envp = nullTerminate(builder.getEnvironmentAsList())
 
     unistd.fork() match {
       case -1 =>
@@ -460,7 +451,7 @@ private[process] object UnixProcessGen2 {
 
         childFds.forEach { fd => unistd.close(fd) }
 
-        apply(pid, builder, infds, outfds, errfds)
+        UnixProcess(f(pid, builder), infds, outfds, errfds)
     }
   }
 
@@ -495,16 +486,7 @@ private[process] object UnixProcessGen2 {
 
     val exec = localCmd.get(0)
     val argv = nullTerminate(localCmd)
-    val envp = nullTerminate {
-      val list = new ArrayList[String]
-      builder
-        .environment()
-        .entrySet()
-        .iterator()
-        .scalaOps
-        .foreach(e => list.add(s"${e.getKey()}=${e.getValue()}"))
-      list
-    }
+    val envp = nullTerminate(builder.getEnvironmentAsList())
 
     /* Maintainers:
      *     There is a performance optimization in the walkPath() method
