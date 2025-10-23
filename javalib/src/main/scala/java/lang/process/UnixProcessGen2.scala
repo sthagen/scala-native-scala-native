@@ -338,19 +338,6 @@ private[process] class UnixProcessHandleGen2(
 private[process] object UnixProcessGen2 {
 
   def apply(
-      pid: CInt,
-      builder: ProcessBuilder,
-      infds: Ptr[CInt],
-      outfds: Ptr[CInt],
-      errfds: Ptr[CInt]
-  ): GenericProcess = UnixProcess(
-    new UnixProcessHandleGen2(pid, builder),
-    infds,
-    outfds,
-    errfds
-  )
-
-  def apply(
       builder: ProcessBuilder
   ): GenericProcess = Zone.acquire { implicit z =>
     /* If builder.directory is not null, it specifies a new working
@@ -376,16 +363,11 @@ private[process] object UnixProcessGen2 {
   def forkChild(builder: ProcessBuilder)(
       f: (Int, ProcessBuilder) => UnixProcessHandle
   )(implicit z: Zone): GenericProcess = {
-    val infds: Ptr[CInt] = stackalloc[CInt](2)
-    val outfds: Ptr[CInt] = stackalloc[CInt](2)
+    val infds: Ptr[CInt] = createPipe(stackalloc[CInt](2), "input")
+    val outfds: Ptr[CInt] = createPipe(stackalloc[CInt](2), "output")
     val errfds =
-      if (builder.redirectErrorStream()) outfds
-      else stackalloc[CInt](2)
-
-    throwOnError(unistd.pipe(infds), s"Couldn't create infds pipe.")
-    throwOnError(unistd.pipe(outfds), s"Couldn't create outfds pipe.")
-    if (!builder.redirectErrorStream())
-      throwOnError(unistd.pipe(errfds), s"Couldn't create errfds pipe.")
+      if (builder.redirectErrorStream()) null
+      else createPipe(stackalloc[CInt](2), "error")
 
     val cmd = builder.command()
     val binaries = binaryPaths(builder.environment(), cmd.get(0))
@@ -407,19 +389,21 @@ private[process] object UnixProcessGen2 {
           builder.redirectOutput(),
           unistd.STDOUT_FILENO
         )
-        setupChildFDS(
-          !(errfds + 1),
-          if (builder.redirectErrorStream()) ProcessBuilder.Redirect.PIPE
-          else builder.redirectError(),
-          unistd.STDERR_FILENO
-        )
+        if (null eq errfds)
+          dup2(unistd.STDOUT_FILENO, unistd.STDERR_FILENO, "pipe")
+        else
+          setupChildFDS(
+            !(errfds + 1),
+            builder.redirectError(),
+            unistd.STDERR_FILENO
+          )
 
         // No sense closing stuff either active or already closed!
         // dup2() will close() what is not INHERITed.
         val parentFds = new ArrayList[CInt] // No Scala Collections in javalib
         parentFds.add(!(infds + 1)) // parent's stdout - write, in child
         parentFds.add(!outfds) // parent's stdin - read, in child
-        if (!builder.redirectErrorStream())
+        if (null ne errfds)
           parentFds.add(!errfds) // parent's stderr - read, in child
 
         parentFds.forEach { fd => unistd.close(fd) }
@@ -446,7 +430,7 @@ private[process] object UnixProcessGen2 {
         val childFds = new ArrayList[CInt] // No Scala Collections in javalib
         childFds.add(!infds) // child's stdin read, in parent
         childFds.add(!(outfds + 1)) // child's stdout write, in parent
-        if (!builder.redirectErrorStream())
+        if (null ne errfds)
           childFds.add(!(errfds + 1)) // child's stderr write, in parent
 
         childFds.forEach { fd => unistd.close(fd) }
@@ -458,34 +442,16 @@ private[process] object UnixProcessGen2 {
   private def spawnChild(
       builder: ProcessBuilder
   )(implicit z: Zone): GenericProcess = {
-    val cmd = builder.command()
-    if (cmd.get(0).indexOf('/') >= 0) {
-      spawnCommand(builder, cmd, attempt = 1)
-    } else {
-      spawnFollowPath(builder)
-    }
-  }
-
-  private def spawnCommand(
-      builder: ProcessBuilder,
-      localCmd: ju.List[String],
-      attempt: Int
-  )(implicit z: Zone): GenericProcess = {
     val pidPtr = stackalloc[pid_t]()
 
-    val infds: Ptr[CInt] = stackalloc[CInt](2)
-    val outfds: Ptr[CInt] = stackalloc[CInt](2)
+    val infds: Ptr[CInt] = createPipe(stackalloc[CInt](2), "input")
+    val outfds: Ptr[CInt] = createPipe(stackalloc[CInt](2), "output")
     val errfds =
-      if (builder.redirectErrorStream()) outfds
-      else stackalloc[CInt](2)
+      if (builder.redirectErrorStream()) null
+      else createPipe(stackalloc[CInt](2), "error")
 
-    throwOnError(unistd.pipe(infds), s"Couldn't create infds pipe.")
-    throwOnError(unistd.pipe(outfds), s"Couldn't create outfds pipe.")
-    if (!builder.redirectErrorStream())
-      throwOnError(unistd.pipe(errfds), s"Couldn't create errfds pipe.")
-
-    val exec = localCmd.get(0)
-    val argv = nullTerminate(localCmd)
+    val cmd = builder.command()
+    val argv = nullTerminate(cmd)
     val envp = nullTerminate(builder.getEnvironmentAsList())
 
     /* Maintainers:
@@ -524,19 +490,26 @@ private[process] object UnixProcessGen2 {
           unistd.STDOUT_FILENO
         )
 
-        setupSpawnFDS(
-          fileActions,
-          !(errfds + 1),
-          if (builder.redirectErrorStream()) ProcessBuilder.Redirect.PIPE
-          else builder.redirectError(),
-          unistd.STDERR_FILENO
-        )
+        if (null eq errfds)
+          dup2Spawn(
+            fileActions,
+            unistd.STDOUT_FILENO,
+            unistd.STDERR_FILENO,
+            "pipe"
+          )
+        else
+          setupSpawnFDS(
+            fileActions,
+            !(errfds + 1),
+            builder.redirectError(),
+            unistd.STDERR_FILENO
+          )
 
         // No Scala Collections in javalib
         val parentFds = new ArrayList[CInt](3)
         parentFds.add(!(infds + 1)) // parent's stdout - write, in child
         parentFds.add(!outfds) // parent's stdin - read, in child
-        if (!builder.redirectErrorStream())
+        if (null ne errfds)
           parentFds.add(!errfds) // parent's stderr - read, in child
 
         parentFds.forEach { fd =>
@@ -550,7 +523,7 @@ private[process] object UnixProcessGen2 {
          * Some shells (bash, ???) will also execute scripts with initial
          * shebang (#!).
          */
-        val status = posix_spawn(
+        def spawn(exec: String, argv: Ptr[CString]): CInt = posix_spawn(
           pidPtr,
           toCString(exec),
           fileActions,
@@ -559,24 +532,30 @@ private[process] object UnixProcessGen2 {
           envp
         )
 
-        if (status == 0) {
-          apply(!pidPtr, builder, infds, outfds, errfds)
-        } else if (!(status == ENOEXEC) && (attempt == 1)) {
-          val msg = fromCString(strerror(status))
-          throw new IOException(s"Unable to posix_spawn process: ${msg}")
-        } else { // try falling back to shell script
-          val fallbackCmd = new ArrayList[String](3)
-          fallbackCmd.add("/bin/sh")
-          fallbackCmd.add("-c")
-          fallbackCmd.add(localCmd.scalaOps.mkString(sep = " "))
+        var status = ENOEXEC
+        val execIter = binaryPaths(builder.environment(), cmd.get(0))
 
-          spawnCommand(builder, fallbackCmd, attempt = 2)
+        while (status == ENOEXEC && execIter.hasNext)
+          status = spawn(execIter.next(), argv)
+
+        if (status == ENOEXEC) { // try falling back to shell script
+          val shCmd = "/bin/sh"
+          val fallbackCmd = Array(shCmd, "-c", cmd.scalaOps.mkString(sep = " "))
+          status = spawn(shCmd, nullTerminate(ju.Arrays.asList(fallbackCmd)))
         }
+
+        if (status != 0) {
+          val msg = fromCString(strerror(status))
+          throw new IOException(s"Unable to posix_spawn process: $msg")
+        }
+
+        val handle = new UnixProcessHandleGen2(!pidPtr, builder)
+        UnixProcess(handle, infds, outfds, errfds)
       } finally {
         val childFds = new ArrayList[CInt] // No Scala Collections in javalib
         childFds.add(!infds) // child's stdin read, in parent
         childFds.add(!(outfds + 1)) // child's stdout write, in parent
-        if (!builder.redirectErrorStream())
+        if (null ne errfds)
           childFds.add(!(errfds + 1)) // child's stderr write, in parent
 
         childFds.forEach(unistd.close(_))
@@ -588,55 +567,6 @@ private[process] object UnixProcessGen2 {
       }
 
     unixProcess
-  }
-
-  private def spawnFollowPath(
-      builder: ProcessBuilder
-  )(implicit z: Zone): GenericProcess = {
-
-    @tailrec
-    def walkPath(iter: UnixPathIterator): GenericProcess = {
-      val cmd = builder.command()
-      val cmd0 = cmd.get(0)
-
-      if (!iter.hasNext()) {
-        val errnoText = fromCString(strerror(errno))
-        val msg = s"Cannot run program '${cmd0}': error=${errno}, ${errnoText}"
-        throw new IOException(msg)
-      } else {
-        /* Maintainers:
-         *     Please see corresponding note in method spawnCommand().
-         *
-         *     Checking that the fully qualified file exists and is
-         *     executable a performance optimization.
-         *
-         *     posix_spawn() is the ultimate arbiter of which files
-         *     the child can and can not execute. posix_spawn() is
-         *     relatively expensive to be called on files "known" to
-         *     either not exist or not be executable.
-         *
-         *    The "canExecute()" test required/assumes that the parent
-         *    can see and execute the same set of files.  This is a
-         *    reasonable precondition. Java 19 has no way to change child
-         *    id or group. spawnCommand() takes care to not specify
-         *    posix_spawn() options for changes which Java 19 does not
-         *    specify.
-         */
-
-        val fName = s"${iter.next()}/${cmd0}"
-        val f = new File(fName)
-        if (!f.canExecute()) {
-          walkPath(iter)
-        } else {
-          val newCmdList = new ArrayList[String](cmd)
-          newCmdList.set(0, fName)
-
-          spawnCommand(builder, newCmdList, attempt = 1)
-        }
-      }
-    }
-
-    walkPath(new UnixPathIterator(builder.environment()))
   }
 
   private def throwOnError(rc: CInt, msg: => String): CInt = {
@@ -658,6 +588,20 @@ private[process] object UnixProcessGen2 {
     res
   }
 
+  private def createPipe(fds: Ptr[CInt], what: String): Ptr[CInt] = {
+    throwOnError(unistd.pipe(fds), s"Couldn't create $what pipe.")
+    fds
+  }
+
+  private def dup2(
+      oldfd: CInt,
+      newfd: CInt,
+      what: String
+  ): Unit = {
+    if (unistd.dup2(oldfd, newfd) == -1)
+      throw new IOException(s"Couldn't duplicate $what file descriptor $errno")
+  }
+
   private def setupChildFDS(
       childFd: CInt,
       redirect: ProcessBuilder.Redirect,
@@ -667,33 +611,30 @@ private[process] object UnixProcessGen2 {
     redirect.`type`() match {
       case ProcessBuilder.Redirect.Type.INHERIT =>
       case ProcessBuilder.Redirect.Type.PIPE    =>
-        if (unistd.dup2(childFd, procFd) == -1) {
-          throw new IOException(
-            s"Couldn't duplicate pipe file descriptor $errno"
-          )
-        }
-      case r @ ProcessBuilder.Redirect.Type.READ =>
+        dup2(childFd, procFd, "pipe")
+      case ProcessBuilder.Redirect.Type.READ =>
         val fd = open(redirect.file(), O_RDONLY)
-        if (unistd.dup2(fd, procFd) == -1) {
-          throw new IOException(
-            s"Couldn't duplicate read file descriptor $errno"
-          )
-        }
-      case r @ ProcessBuilder.Redirect.Type.WRITE =>
+        dup2(fd, procFd, "read")
+      case ProcessBuilder.Redirect.Type.WRITE =>
         val fd = open(redirect.file(), O_CREAT | O_WRONLY | O_TRUNC)
-        if (unistd.dup2(fd, procFd) == -1) {
-          throw new IOException(
-            s"Couldn't duplicate write file descriptor $errno"
-          )
-        }
-      case r @ ProcessBuilder.Redirect.Type.APPEND =>
+        dup2(fd, procFd, "write")
+      case ProcessBuilder.Redirect.Type.APPEND =>
         val fd = open(redirect.file(), O_CREAT | O_WRONLY | O_APPEND)
-        if (unistd.dup2(fd, procFd) == -1) {
-          throw new IOException(
-            s"Couldn't duplicate append file descriptor $errno"
-          )
-        }
+        dup2(fd, procFd, "append")
     }
+  }
+
+  private def dup2Spawn(
+      fileActions: Ptr[posix_spawn_file_actions_t],
+      oldfd: CInt,
+      newfd: CInt,
+      what: String
+  ): Unit = {
+    val status = posix_spawn_file_actions_adddup2(fileActions, oldfd, newfd)
+    if (status != 0)
+      throw new IOException(
+        s"Could not adddup2 $what file descriptor $newfd: $status"
+      )
   }
 
   private def setupSpawnFDS(
@@ -707,46 +648,22 @@ private[process] object UnixProcessGen2 {
       case ProcessBuilder.Redirect.Type.INHERIT =>
 
       case ProcessBuilder.Redirect.Type.PIPE =>
-        val status =
-          posix_spawn_file_actions_adddup2(fileActions, childFd, procFd)
-        if (status != 0) {
-          throw new IOException(
-            s"Could not adddup2 pipe file descriptor ${procFd}: ${status}"
-          )
-        }
+        dup2Spawn(fileActions, childFd, procFd, "pipe")
 
-      case r @ ProcessBuilder.Redirect.Type.READ =>
+      case ProcessBuilder.Redirect.Type.READ =>
         val fd = open(redirect.file(), O_RDONLY)
         // result is error checked in inline open() below.
+        dup2Spawn(fileActions, fd, procFd, "read")
 
-        val status = posix_spawn_file_actions_adddup2(fileActions, fd, procFd)
-        if (status != 0) {
-          throw new IOException(
-            s"Could not adddup2 read file ${redirect.file()}: ${status}"
-          )
-        }
-
-      case r @ ProcessBuilder.Redirect.Type.WRITE =>
+      case ProcessBuilder.Redirect.Type.WRITE =>
         val fd = open(redirect.file(), O_CREAT | O_WRONLY | O_TRUNC)
         // result is error checked in inline open() below.
+        dup2Spawn(fileActions, fd, procFd, "write")
 
-        val status = posix_spawn_file_actions_adddup2(fileActions, fd, procFd)
-        if (status != 0) {
-          throw new IOException(
-            s"Could not adddup2 write file ${redirect.file()}: ${status}"
-          )
-        }
-
-      case r @ ProcessBuilder.Redirect.Type.APPEND =>
+      case ProcessBuilder.Redirect.Type.APPEND =>
         val fd = open(redirect.file(), O_CREAT | O_WRONLY | O_APPEND)
         // result is error checked in inline open() below.
-
-        val status = posix_spawn_file_actions_adddup2(fileActions, fd, procFd)
-        if (status != 0) {
-          throw new IOException(
-            s"Could not adddup2 append file ${redirect.file()}: ${status}"
-          )
-        }
+        dup2Spawn(fileActions, fd, procFd, "append")
     }
   }
 
@@ -766,52 +683,19 @@ private[process] object UnixProcessGen2 {
   private def binaryPaths(
       environment: java.util.Map[String, String],
       bin: String
-  ): Seq[String] = {
-    if ((bin.startsWith("/")) || (bin.startsWith("."))) {
-      Seq(bin)
+  ): Iterator[String] = {
+    if (bin.indexOf('/') >= 0 || bin.startsWith(".")) {
+      Iterator(bin)
     } else {
       val path = environment.get("PATH") match {
         case null => "/bin:/usr/bin:/usr/local/bin"
         case p    => p
       }
-
-      path
-        .split(':')
-        .toIndexedSeq
-        .map { absPath => new File(s"$absPath/$bin") }
-        .collect {
-          case f if f.canExecute() => f.toString
-        }
-    }
-  }
-  private class UnixPathIterator(
-      environment: java.util.Map[String, String]
-  ) extends ju.Iterator[String] {
-    /* The default path here is passing strange Scala Native prior art.
-     * It is preserved to keep compatability  with UnixProcessGen1 and prior
-     * versions of Scala Native.
-     *
-     * For example, Ubuntu Linux bash compiles in:
-     *   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-     *   // Note that "/usr/local/" comes before (left of) "/usr/".
-     */
-    val path = environment.getOrDefault("PATH", "/bin:/usr/bin:/usr/local/bin")
-
-    val pathElements = path.split(':')
-    val nElements = pathElements.length
-    var lookingAt = 0
-
-    override def hasNext(): Boolean = (lookingAt < nElements)
-
-    override def next(): String = {
-      if (lookingAt >= nElements) {
-        throw new NoSuchElementException()
-      } else {
-        val d = pathElements(lookingAt)
-        lookingAt += 1
-        // "" == "." is a poorly documented Unix PATH quirk/corner_case.
-        if (d.length == 0) "." else d
+      path.split(File.pathSeparator).iterator.flatMap { absPath =>
+        val f = if (absPath.isEmpty) new File(bin) else new File(absPath, bin)
+        if (f.canExecute()) Some(f.toString()) else None
       }
     }
   }
+
 }
