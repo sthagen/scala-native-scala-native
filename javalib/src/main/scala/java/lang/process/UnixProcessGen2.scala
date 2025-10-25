@@ -40,10 +40,21 @@ import ju.concurrent.TimeUnit
  * efficient nor a short code path" you are probably right.
  */
 
-private[process] class UnixProcessHandleGen2(
+private[process] class UnixProcessHandleGen2(pidFd: CInt)(
     override protected val _pid: CInt,
     override val builder: ProcessBuilder
 ) extends UnixProcessHandle {
+
+  /** Closes [[pidFd]], if any, used to monitor if the process has exited.
+   *
+   *  Guaranteed to be called once, after the process has been reaped, so
+   *  [[pidFd]] is no longer in use.
+   *
+   *  @see
+   *    [[GenericProcessHandle.close]] for more details.
+   */
+  override protected final def close(): Unit =
+    if (pidFd != -1) unistd.close(pidFd)
 
   override protected def getExitCodeImpl: Option[Int] =
     waitpidImplNoECHILD(_pid, options = WNOHANG)
@@ -235,28 +246,12 @@ private[process] class UnixProcessHandleGen2(
   private def linuxWaitForImpl(timeout: Option[Ptr[timespec]]): Unit = {
     // epoll() is not used in this method since only one fd is involved.
 
-    // close-on-exec is automatically set on the pidFd.
-    val pidFd = pidfd_open(_pid, 0.toUInt)
-
-    if (pidFd == -1) {
-      if (errno == EINTR) throw new InterruptedException()
-      else if (errno == ECHILD || errno == ESRCH || errno == EINVAL)
-        setCachedExitCode(1)
-      else
-        throw new IOException(
-          s"pidfd_open(${_pid}) failed: ${fromCString(strerror(errno))}"
-        )
-      return
-    }
-
     val fds = stackalloc[struct_pollfd](1)
     (fds + 0).fd = pidFd
     (fds + 0).events = (pollEvents.POLLIN | pollEvents.POLLRDNORM).toShort
 
     // 'null' sigmask will retain all current signals.
     val ppollStatus = ppoll(fds, 1.toUSize, timeout.orNull, null)
-
-    unistd.close(pidFd) // ensure fd does not leak away.
 
     if (ppollStatus < 0) {
       // handled in the caller
@@ -337,6 +332,25 @@ private[process] class UnixProcessHandleGen2(
 
 private[process] object UnixProcessGen2 {
 
+  private def createHandle(
+      pid: CInt,
+      builder: ProcessBuilder
+  ): UnixProcessHandleGen2 = {
+    val pidFd =
+      if (LinktimeInfo.isLinux) {
+        val fd = pidfd_open(pid, 0.toUInt)
+        if (fd == -1) {
+          val msg = s"pidfd_open($pid) failed: ${fromCString(strerror(errno))}"
+          throw new IOException(msg)
+        }
+        fd
+      } else {
+        -1
+      }
+
+    new UnixProcessHandleGen2(pidFd)(pid, builder)
+  }
+
   def apply(
       builder: ProcessBuilder
   ): GenericProcess = Zone.acquire { implicit z =>
@@ -355,7 +369,7 @@ private[process] object UnixProcessGen2 {
     if (builder.isCwd)
       spawnChild(builder)
     else
-      forkChild(builder)(new UnixProcessHandleGen2(_, _))
+      forkChild(builder)(createHandle)
   }
 
   def forkChild(builder: ProcessBuilder)(
@@ -382,7 +396,7 @@ private[process] object UnixProcessGen2 {
           builder.redirectOutput(),
           unistd.STDOUT_FILENO
         )
-        if (null eq errfds)
+        if (builder.redirectErrorStream())
           dup2(unistd.STDOUT_FILENO, unistd.STDERR_FILENO, "pipe")
         else
           setupChildFDS(
@@ -391,15 +405,15 @@ private[process] object UnixProcessGen2 {
             unistd.STDERR_FILENO
           )
 
-        // No sense closing stuff either active or already closed!
-        // dup2() will close() what is not INHERITed.
-        val parentFds = new ArrayList[CInt] // No Scala Collections in javalib
-        parentFds.add(!(infds + 1)) // parent's stdout - write, in child
-        parentFds.add(!outfds) // parent's stdin - read, in child
-        if (null ne errfds)
-          parentFds.add(!errfds) // parent's stderr - read, in child
+        def closePipe(pipe: Ptr[CInt]): Unit =
+          if (pipe ne null) {
+            unistd.close(!(pipe + 0))
+            unistd.close(!(pipe + 1))
+          }
 
-        parentFds.forEach { fd => unistd.close(fd) }
+        closePipe(infds)
+        closePipe(outfds)
+        closePipe(errfds)
 
         binaries.foreach { b =>
           val bin = toCString(b)
@@ -420,14 +434,6 @@ private[process] object UnixProcessGen2 {
         throw new IOException(s"Failed to create process for command: $cmd")
 
       case pid =>
-        val childFds = new ArrayList[CInt] // No Scala Collections in javalib
-        childFds.add(!infds) // child's stdin read, in parent
-        childFds.add(!(outfds + 1)) // child's stdout write, in parent
-        if (null ne errfds)
-          childFds.add(!(errfds + 1)) // child's stderr write, in parent
-
-        childFds.forEach { fd => unistd.close(fd) }
-
         UnixProcess(f(pid, builder), infds, outfds, errfds)
     }
   }
@@ -479,7 +485,7 @@ private[process] object UnixProcessGen2 {
           unistd.STDOUT_FILENO
         )
 
-        if (null eq errfds)
+        if (builder.redirectErrorStream())
           dup2Spawn(
             fileActions,
             unistd.STDOUT_FILENO,
@@ -494,19 +500,20 @@ private[process] object UnixProcessGen2 {
             unistd.STDERR_FILENO
           )
 
-        // No Scala Collections in javalib
-        val parentFds = new ArrayList[CInt](3)
-        parentFds.add(!(infds + 1)) // parent's stdout - write, in child
-        parentFds.add(!outfds) // parent's stdin - read, in child
-        if (null ne errfds)
-          parentFds.add(!errfds) // parent's stderr - read, in child
+        def closeSpawn(fd: CInt): Unit = throwOnError(
+          posix_spawn_file_actions_addclose(fileActions, fd),
+          s"posix_spawn_file_actions_addclose fd: $fd"
+        )
 
-        parentFds.forEach { fd =>
-          throwOnError(
-            posix_spawn_file_actions_addclose(fileActions, fd),
-            s"posix_spawn_file_actions_addclose fd: ${fd}"
-          )
-        }
+        def closePipe(pipe: Ptr[CInt]): Unit =
+          if (pipe ne null) {
+            closeSpawn(!(pipe + 0))
+            closeSpawn(!(pipe + 1))
+          }
+
+        closePipe(infds)
+        closePipe(outfds)
+        closePipe(errfds)
 
         /* This will exec binary executables.
          * Some shells (bash, ???) will also execute scripts with initial
@@ -538,17 +545,8 @@ private[process] object UnixProcessGen2 {
           throw new IOException(s"Unable to posix_spawn process: $msg")
         }
 
-        val handle = new UnixProcessHandleGen2(!pidPtr, builder)
-        UnixProcess(handle, infds, outfds, errfds)
+        UnixProcess(createHandle(!pidPtr, builder), infds, outfds, errfds)
       } finally {
-        val childFds = new ArrayList[CInt] // No Scala Collections in javalib
-        childFds.add(!infds) // child's stdin read, in parent
-        childFds.add(!(outfds + 1)) // child's stdout write, in parent
-        if (null ne errfds)
-          childFds.add(!(errfds + 1)) // child's stderr write, in parent
-
-        childFds.forEach(unistd.close(_))
-
         throwOnError(
           posix_spawn_file_actions_destroy(fileActions),
           "posix_spawn_file_actions_destroy"
@@ -558,7 +556,7 @@ private[process] object UnixProcessGen2 {
     unixProcess
   }
 
-  private def throwOnError(rc: CInt, msg: => String): CInt = {
+  private[process] def throwOnError(rc: CInt, msg: => String): CInt = {
     if (rc != 0) {
       throw new IOException(s"$msg Error code: $rc, Error number: $errno")
     } else {
@@ -577,22 +575,24 @@ private[process] object UnixProcessGen2 {
     res
   }
 
-  private def createPipe(what: String)(implicit
-      z: Zone
-  ): Ptr[CInt] = {
-    val fds = alloc[CInt](2)
-    throwOnError(unistd.pipe(fds), s"Couldn't create $what pipe.")
-    fds
-  }
+  private def createPipe(what: String, redirect: ProcessBuilder.Redirect)(
+      implicit z: Zone
+  ): Ptr[CInt] =
+    if (redirect.`type`() != ProcessBuilder.Redirect.Type.PIPE) null
+    else {
+      val fds = alloc[CInt](2)
+      throwOnError(unistd.pipe(fds), s"Couldn't create $what pipe.")
+      fds
+    }
 
   private def createPipes(
       pb: ProcessBuilder
   )(implicit z: Zone): (Ptr[CInt], Ptr[CInt], Ptr[CInt]) = {
-    val infds: Ptr[CInt] = createPipe("input")
-    val outfds: Ptr[CInt] = createPipe("output")
+    val infds: Ptr[CInt] = createPipe("input", pb.redirectInput())
+    val outfds: Ptr[CInt] = createPipe("output", pb.redirectOutput())
     val errfds =
       if (pb.redirectErrorStream()) null
-      else createPipe("error")
+      else createPipe("error", pb.redirectError())
     (infds, outfds, errfds)
   }
 
@@ -606,7 +606,7 @@ private[process] object UnixProcessGen2 {
   }
 
   private def setupChildFDS(
-      childFd: CInt,
+      childFd: => CInt,
       redirect: ProcessBuilder.Redirect,
       procFd: CInt
   )(implicit z: Zone): Unit = {
@@ -617,6 +617,7 @@ private[process] object UnixProcessGen2 {
       if (fd < 0)
         throw new IOException(s"Unable to open $what file $file ($errno)")
       dup2(fd, procFd, what)
+      unistd.close(fd)
     }
     import fcntl.{open => _, _}
     redirect.`type`() match {
@@ -647,7 +648,7 @@ private[process] object UnixProcessGen2 {
 
   private def setupSpawnFDS(
       fileActions: Ptr[posix_spawn_file_actions_t],
-      childFd: CInt,
+      childFd: => CInt,
       redirect: ProcessBuilder.Redirect,
       procFd: CInt
   )(implicit z: Zone): Unit = {

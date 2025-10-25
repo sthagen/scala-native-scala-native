@@ -96,22 +96,6 @@ import scala.scalanative.windows.NamedPipeApi.PeekNamedPipe
  *     has copied the in-flight os pipe data and switched the 'src' variable to
  *     read from that saved data. This is accomplished by using
  *     synchronized methods.
- *
- *     - UnixProcess* and WindowProcess check if the child process has exited
- *       at different places in the code. This can have a major effect on
- *       the timing of events, including the number of bytes available at
- *       an I/O event.
- *
- *       - UnixProcess* checks in the public "waitfor(*)" method.
- *         That method is usually called once by user of PipeIO.
- *
- *       - WindowsProcess checks in the private "checkResult()" method.
- *         That method is usually called once per PipeIO public method call.
- *         This means that it is called at least once per I/O.
- *
- *   - UnixProcessGen2 and WindowsProcess are well exercised.
- *     UnixProcessGen1 is less well exercised and may retain
- *     unfortunate timing interactions.
  */
 
 private[process] final class PipeIO[T](
@@ -143,17 +127,31 @@ private[process] object PipeIO {
 
     // By convention, caller is synchronized on 'this'.
     private def availableUnSync() = {
-      src match {
-        case fis: FileInputStream => availableFD()
-        case _                    => src.available()
-      }
+      if (src eq is) availableFD() else src.available()
     }
 
     override def available(): Int =
       synchronized(availableUnSync())
 
+    private def switchToNullInput(): Unit = {
+      src.close()
+      src = NullInput
+    }
+
+    private def readOne(): Int = {
+      val res = src.read()
+      if (res == -1) switchToNullInput()
+      res
+    }
+
+    private def readSome(buf: Array[scala.Byte], offset: Int, len: Int): Int = {
+      val res = src.read(buf, offset, len)
+      if (res < 0) switchToNullInput()
+      res
+    }
+
     override def read(): Int =
-      synchronized(src.read())
+      if (src eq NullInput) -1 else synchronized(readOne())
 
     override def read(buf: Array[scala.Byte], offset: Int, len: Int): Int = {
 
@@ -165,34 +163,33 @@ private[process] object PipeIO {
       }
 
       if (len == 0) 0
+      else if (src eq NullInput) -1
       else
         synchronized {
           val avail = availableUnSync()
 
           if (avail > 0) {
             val nToRead = Math.min(len, avail)
-            src.read(buf, offset, nToRead)
-          } else {
-            src match {
-              case fis: FileInputStream =>
-                val nRead = src.read(buf, offset, 1)
+            readSome(buf, offset, nToRead)
+          } else if (src eq is) {
+            val nRead = readSome(buf, offset, 1)
 
-                if (nRead == -1) -1
-                else {
+            if (nRead == -1) -1
+            else {
 
-                  val nToRead =
-                    Math.min(len - 1, availableUnSync()) // possibly zero
+              val nToRead =
+                Math.min(len - 1, availableUnSync()) // possibly zero
 
-                  val nSecondRead =
-                    if (nToRead == 0) 0
-                    else src.read(buf, offset + 1, nToRead)
+              val nSecondRead =
+                if (nToRead == 0) 0
+                else readSome(buf, offset + 1, nToRead)
 
-                  if (nSecondRead == -1) 1
-                  else nSecondRead + 1
-                }
-
-              case _ => -1 // EOF
+              if (nSecondRead == -1) 1
+              else nSecondRead + 1
             }
+          } else {
+            switchToNullInput()
+            -1 // EOF
           }
         }
     }
@@ -200,18 +197,17 @@ private[process] object PipeIO {
     /* Switch horses, or at least InputStreams, "in media res".
      * See Design Note at top of file.
      */
-    override def drain(): Unit = synchronized {
+    override def drain(): Unit = if (src eq is) synchronized {
+      if (src eq is) { // not yet drained
+        val avail = availableFD()
 
-      val avail = availableUnSync()
+        src =
+          if (avail <= 0) PipeIO.NullInput
+          else new ByteArrayInputStream(is.readNBytes(avail))
 
-      val newSrc =
-        if (avail <= 0) PipeIO.NullInput
-        else new ByteArrayInputStream(src.readNBytes(avail))
-
-      // release JVM FileDescriptor and, especially, its OS fd.
-      src.close()
-
-      src = newSrc
+        // release JVM FileDescriptor and, especially, its OS fd.
+        is.close()
+      }
     }
 
     private def availableFD(): Int = {
@@ -250,8 +246,9 @@ private[process] object PipeIO {
   private object NullInput extends Stream {
     override def available(): Int = 0
     override def close(): Unit = {}
-    override def read(): Int = 0
-    override def read(buf: Array[scala.Byte], offset: Int, len: Int) = -1
+    override def read(): Int = -1
+    override def read(buf: Array[scala.Byte], offset: Int, len: Int) =
+      if (len == 0) 0 else -1
   }
 
   private object NullOutput extends OutputStream {
