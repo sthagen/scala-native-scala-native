@@ -96,7 +96,7 @@ private[process] abstract class GenericProcessHandle extends ProcessHandle {
   val builder: ProcessBuilder
 
   private val processInfo: GenericProcessInfo = GenericProcessInfo(builder)
-  private val completion = new CompletableFuture[java.lang.Integer]()
+  protected val completion = new CompletableFuture[java.lang.Integer]()
 
   override final def isAlive(): Boolean = !hasExited
 
@@ -114,14 +114,14 @@ private[process] abstract class GenericProcessHandle extends ProcessHandle {
     }
   }
 
-  protected final def setCachedExitCode(value: Int): Boolean = {
+  final def setCachedExitCode(value: Int): Boolean = {
     val ok = completion.complete(value)
     if (ok) close()
     ok
   }
 
   protected final def checkAndSetExitCode(): Boolean =
-    synchronized(getExitCodeImpl.exists(setCachedExitCode))
+    getExitCodeImpl.exists(setCachedExitCode)
 
   def onExitApply[A <: AnyRef](
       fn: function.Function[java.lang.Integer, A]
@@ -150,9 +150,9 @@ private[process] abstract class GenericProcessHandle extends ProcessHandle {
     hasExited || destroyImpl(force = force)
 
   private def waitForWith(check: => Boolean) = hasExited || check && hasExited
-  def waitFor(): Boolean = waitForWith(synchronized(waitForImpl()))
+  def waitFor(): Boolean = waitForWith(waitForImpl())
   def waitFor(timeout: scala.Long, unit: TimeUnit): Boolean =
-    waitForWith(timeout > 0L && synchronized(waitForImpl(timeout, unit)))
+    waitForWith(timeout > 0L && waitForImpl(timeout, unit))
 
   override def onExit(): CompletableFuture[ProcessHandle] =
     onExitApply(_ => this: ProcessHandle)

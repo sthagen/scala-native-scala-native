@@ -50,8 +50,8 @@ private[process] object UnixProcess {
     getFileDescriptor(errfds, read = true)
   )(handle)
 
-  def apply(pb: ProcessBuilder): GenericProcess = {
-    val useGen2 = if (LinktimeInfo.is32BitPlatform) {
+  private[process] val useGen2 =
+    if (LinktimeInfo.is32BitPlatform) {
       false
     } else if (LinktimeInfo.isLinux) {
       LinuxOsSpecific.hasPidfdOpen()
@@ -62,6 +62,7 @@ private[process] object UnixProcess {
       false
     }
 
+  def apply(pb: ProcessBuilder): GenericProcess = {
     if (useGen2) UnixProcessGen2(pb) else UnixProcessGen1(pb)
   }
 
@@ -79,7 +80,7 @@ private[process] object UnixProcess {
       case -1 =>
         import posix.errno._
         if (errno == EINTR) throw new InterruptedException()
-        else if (errno == ECHILD) Some(1) // see SN issues #4208 and #4348
+        else if (errno == ECHILD) None // see SN issues #4208 and #4348
         else throw new IOException(s"waitpid failed: ${LibcExt.strError()}")
       case _ => Some(getExitCodeFromWaitStatus(!wstatus))
     }
