@@ -36,21 +36,17 @@ import ju.concurrent.TimeUnit
  * efficient nor a short code path" you are probably right.
  */
 
-private[process] class UnixProcessHandleGen2(pidFd: CInt)(
+private[process] class UnixProcessHandleGen2(pidFd: UnixFileDescriptorAtomic)(
     override protected val _pid: CInt,
     override val builder: ProcessBuilder
 ) extends UnixProcessHandle {
 
   /** Closes [[pidFd]], if any, used to monitor if the process has exited.
    *
-   *  Guaranteed to be called once, after the process has been reaped, so
-   *  [[pidFd]] is no longer in use.
-   *
    *  @see
    *    [[GenericProcessHandle.close]] for more details.
    */
-  override protected final def close(): Unit =
-    if (pidFd != -1) unistd.close(pidFd)
+  override protected final def close(): Unit = pidFd.close()
 
   override protected def getExitCodeImpl: Option[Int] =
     UnixProcess.waitpidNowNoECHILD(_pid)
@@ -196,7 +192,7 @@ private[process] class UnixProcessHandleGen2(pidFd: CInt)(
     // epoll() is not used in this method since only one fd is involved.
 
     val fds = stackalloc[struct_pollfd](1)
-    (fds + 0).fd = pidFd
+    (fds + 0).fd = pidFd.get()
     (fds + 0).events = (pollEvents.POLLIN | pollEvents.POLLRDNORM).toShort
 
     // 'null' sigmask will retain all current signals.
@@ -226,18 +222,25 @@ private[process] class UnixProcessHandleGen2(pidFd: CInt)(
       s"waitFor pid=${_pid} kqueue failed"
     )
 
-    val childExitEvent = stackalloc[kevent]()
-    val eventResult = stackalloc[kevent]()
+    val keventSize: CSize = scalanative_kevent_size()
+    val childExitEvent = stackalloc[Byte](keventSize)
+    val eventResult = stackalloc[Byte](keventSize)
 
     /* event will eventually be deleted when child pid closes.
      * EV_DISPATCH hints that the event can be deleted immediately after
      * delivery.
      */
 
-    childExitEvent.ident = _pid.toUSize
-    childExitEvent.filter = EVFILT_PROC.toShort
-    childExitEvent.flags = (EV_ADD | EV_DISPATCH).toUShort
-    childExitEvent.fflags = (NOTE_EXIT | NOTE_EXITSTATUS).toUInt
+    scalanative_kevent_set(
+      childExitEvent,
+      0,
+      _pid.toUSize,
+      EVFILT_PROC.toShort,
+      (EV_ADD | EV_DISPATCH).toUShort,
+      (NOTE_EXIT | NOTE_EXITSTATUS).toUInt,
+      0,
+      null
+    )
 
     val status = UnixProcess.throwOnErrorRetryEINTR(
       kevent(
@@ -280,7 +283,7 @@ private[process] object UnixProcessGen2 {
       pid: CInt,
       builder: ProcessBuilder
   ): UnixProcessHandleGen2 = {
-    val pidFd =
+    val pidFd = UnixFileDescriptorAtomic(
       if (LinktimeInfo.isLinux) {
         import scalanative.linux.pidfd._
         val fd = pidfd_open(pid, 0.toUInt)
@@ -292,6 +295,7 @@ private[process] object UnixProcessGen2 {
       } else {
         -1
       }
+    )
 
     new UnixProcessHandleGen2(pidFd)(pid, builder)
   }
