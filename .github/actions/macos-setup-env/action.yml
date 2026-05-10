@@ -6,16 +6,17 @@ inputs:
     required: true
   java-version:
     description: "Java version to use in tests"
-    default: "17"
+    default: "25"
   llvm-version:
     description: "Custom version of LLVM to use"
+    default: "16"
   gc: 
     description: "Garbage collector used, might require installing dependencies"
 runs:
   using: "composite"
   steps:
-    - uses: coursier/cache-action@v6
-    - uses: coursier/setup-action@v1
+    - uses: coursier/cache-action@v8
+    - uses: coursier/setup-action@v3
       with:
         jvm: ${{inputs.java-version}}
         apps: sbt
