@@ -64,7 +64,7 @@ private[codegen] abstract class AbstractCodeGen(
     dir.write(metadata) { metadataWriter =>
       implicit val metadata: MetadataCodeGen.Context =
         new MetadataCodeGen.Context(this, new FileShowBuilder(metadataWriter))
-      genDebugMetadata()
+      genPlatformMetadata()
 
       dir.write(body) { writer =>
         implicit val fsb: ShowBuilder = new FileShowBuilder(writer)
@@ -85,15 +85,23 @@ private[codegen] abstract class AbstractCodeGen(
     dir.merge(Seq(body, metadata), headers)
   }
 
-  private def genDebugMetadata()(implicit
+  private def genPlatformMetadata()(implicit
       ctx: MetadataCodeGen.Context
   ): Unit = {
     import Metadata.Constants._
     import Metadata.ModFlagBehavior._
-    dbg("llvm.module.flags")(
-      tuple(Max, "Dwarf Version", DWARF_VERSION),
-      tuple(Warning, "Debug Info Version", DEBUG_INFO_VERSION)
-    )
+    val flags = List.newBuilder[Metadata.Node]
+    if (!platform.targetsWindows) {
+      flags += tuple(Min, "PIC Level", PIC_LEVEL)
+      flags += tuple(Max, "PIE Level", PIE_LEVEL)
+    }
+    if (generateDebugMetadata) {
+      flags += tuple(Max, "Dwarf Version", DWARF_VERSION)
+      flags += tuple(Warning, "Debug Info Version", DEBUG_INFO_VERSION)
+    }
+    val result = flags.result()
+    if (result.nonEmpty)
+      emitNamedMetadata("llvm.module.flags")(result: _*)
   }
 
   private def genDeps()(implicit
@@ -1030,7 +1038,21 @@ private[codegen] abstract class AbstractCodeGen(
         )
 
       case Lower.GCYield if useGCYieldPointTraps =>
-        // We can't express volatile load in NIR, inline only expected usage
+        // We can't express volatile load in NIR, inline only expected usage.
+        //
+        // Both loads must be volatile. The first reads the per-thread trap
+        // cell pointer from the thread-local @scalanative_GC_yieldpoint_trap
+        // slot; without volatile, LLVM is free to CSE/hoist this load (and
+        // the underlying `mrs tpidr_el0` address calculation on AArch64) to
+        // a single read at function entry, spilling the result to the stack.
+        // Continuation suspend/resume can then move execution to a different
+        // OS thread mid-function; subsequent safepoint polls would reuse the
+        // spilled (stale) trap-cell pointer of the original carrier. When
+        // GC arms safepoints all carriers' trap pages get mprotected, so the
+        // stale dereference faults on a foreign mutator's page and the
+        // SafepointTrapHandler cannot match it against the current carrier.
+        // Marking the load volatile forbids LLVM from removing/merging it
+        // and forces a fresh TLS-slot read at every yield point.
         val trap = fresh()
         val nir.Sig.Extern(safepointTrapField) =
           Lower.GCYieldPointTrapName.sig.unmangled: @unchecked
@@ -1038,11 +1060,11 @@ private[codegen] abstract class AbstractCodeGen(
         str {
           if (useOpaquePointers)
             s"""|
-                |  %_${trap.id} = load ptr, ptr @${safepointTrapField}
+                |  %_${trap.id} = load volatile ptr, ptr @${safepointTrapField}
                 |  %_${fresh().id} = load volatile ptr, ptr %_${trap.id}""".stripMargin
           else
             s"""|
-                |  %_${trap.id} = load i8**, i8*** bitcast(i8** @$safepointTrapField to i8***)
+                |  %_${trap.id} = load volatile i8**, i8*** bitcast(i8** @$safepointTrapField to i8***)
                 |  %_${fresh().id} = load volatile i8*, i8** %_${trap.id}""".stripMargin
         }
 
