@@ -38,7 +38,7 @@ object ScalaVersions {
 
   // Tested in scheduled nightly CI to check compiler plugins
   // List maintains only upcoming releases, removed from the list after reaching stable status
-  lazy val scala3RCVersions = List("3.9.0-RC1")
+  lazy val scala3RCVersions = List("3.9.0-RC3")
 
   // List of nightly versions can be found here: https://repo.scala-lang.org/ui/native/maven-nightlies/org/scala-lang/scala3-compiler_3
   // or check outputs of `scala -O --version -S 3.nightly`
@@ -56,10 +56,10 @@ object ScalaVersions {
   // minimum version rationale:
   //   An sbt version after 1.12.8, which fixed a CVE on Windows.
 
-  val sbt10Version: String = "1.12.9"
+  val sbt10Version: String = "1.12.14"
   val sbt10ScalaVersion: String = scala212
 
-  val sbt2Version: String = "2.0.0-RC15"
+  val sbt2Version: String = "2.0.3"
   val sbt2ScalaVersion: String = "3.8.4"
 
   val crossSbtVersions = Seq(sbt10Version, sbt2Version)
