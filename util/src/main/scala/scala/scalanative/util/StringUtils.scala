@@ -15,9 +15,9 @@ object StringUtils {
    */
   def processEscapes(str: String): Array[Byte] = {
     val len = str.length
-    val b = Array.newBuilder[Byte]
+    val b = new ArrayBuilder.ofByte()
 
-    def append(str: String): ArrayBuilder[Byte] = b ++= str.getBytes
+    def append(str: String): ArrayBuilder.ofByte = b ++= str.getBytes
 
     // replace escapes with given first escape
     def isHex(c: Char): Boolean =
@@ -26,7 +26,7 @@ object StringUtils {
         (c >= 'A' && c <= 'F')
 
     // append replacement starting at index `i`, with `next` backslash
-    @tailrec def loop(from: Int): ArrayBuilder[Byte] = {
+    @tailrec def loop(from: Int): ArrayBuilder.ofByte = {
 
       str.indexOf('\\', from) match {
         case -1  => append(str.substring(from))

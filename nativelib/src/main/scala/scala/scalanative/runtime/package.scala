@@ -12,6 +12,7 @@ import scalanative.unsafe._
 import scalanative.unsigned.USize
 
 package object runtime {
+  import NativeThread.ThreadInfoOps
   def filename = ExecInfo.filename
   def startTime: Long = ExecInfo.startTime
   def uptime: Long = System.currentTimeMillis() - startTime
@@ -75,6 +76,7 @@ package object runtime {
       )
       System.exit(1)
     }
+    NativeThread.TLS.currentThreadInfo().isInitialized = true
 
     val argv = fromRawPtr[CString](rawargv)
     val args = new scala.Array[String](argc - 1)
@@ -128,6 +130,7 @@ package object runtime {
       }
       shouldWaitForThreads || shouldRunQueuedTasks
     }) ()
+    NativeThread.TLS.currentThreadInfo().isInitialized = false
     StackOverflowGuards.close()
   }
 
@@ -260,6 +263,8 @@ package object runtime {
         saveResult(ex)
         throw error
     } finally {
+      if (isMultithreadingEnabled)
+        ModuleInitialization.completeForCurrentThread()
       cls.notifyAll()
     }
   }
@@ -362,6 +367,9 @@ package object runtime {
 
     @name("scalanative_moduleInitializationInstanceForCurrentThread")
     def instanceForCurrentThread(context: RawPtr): AnyRef = extern
+
+    @name("scalanative_completeModuleInitializationForCurrentThread")
+    def completeForCurrentThread(): Unit = extern
   }
 
 }

@@ -45,7 +45,7 @@ jobs:
   check-compiles:
     name: Test compilation of all modules
     runs-on: ubuntu-22.04
-    needs: [check-compiles]
+    needs: [load_tag]
     if: needs.load_tag.outputs.skip == 'false' # repository check is done in load_tag
     steps:
       - uses: actions/checkout@v7
@@ -60,15 +60,14 @@ jobs:
   publish:
     name: Publish for each Scala binary version
     runs-on: ubuntu-22.04
-    needs: [load_tag]
+    needs: [load_tag, check-compiles]
     if: needs.load_tag.outputs.skip == 'false' # repository check is done in load_tag
     strategy:
       fail-fast: false
       matrix:
         # Older Scala compiler version don't support -release flag, leading to java.lang.NoSuchMethodError: java.nio.ByteBuffer.position(I)Ljava/nio/ByteBuffer in nir.serialization.Prelude$
         # Make sure to use JDK 8 to keep binary compatibility
-        include:
-        - scala: ["2.12", "2.13", "3"]
+        scala: ["2.12", "2.13", "3"]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-setup-env
@@ -128,12 +127,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/linux-setup-env
+      - uses: coursier/cache-action@v8
+      - uses: coursier/setup-action@v3
         with:
-          scala-version: "3" # unused
+          jvm: 25
+          apps: sbt
       - name: Dispatch to workflows of dependant projects
         run: |
-          publishedVersion=$(sbt -no-colors "print version" | tail -n 1)
+          set -euo pipefail
+          publishedVersion=$(sbt --server --batch --color=never --supershell=never -error "print ThisBuild / version" | tail -n 1)
           echo "This build version: ${publishedVersion}"
 
           curl https://api.github.com/repos/${{ matrix.repo }}/dispatches \

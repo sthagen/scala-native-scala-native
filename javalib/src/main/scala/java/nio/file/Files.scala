@@ -356,7 +356,18 @@ object Files {
       if (targetExists) Files.delete(target)
       createSymbolicLink(target, readSymbolicLink(source), Array.empty)
     } else if (isDirectory(source, Array.empty)) {
-      createDirectory(target, Array.empty)
+      /* createDirectory rejects every existing path. Copying a directory
+       * over an empty one succeeds, and over a non-empty one throws
+       * DirectoryNotEmptyException.
+       */
+      if (targetExists && isDirectory(target, linkOpts)) {
+        val children = list(target)
+        val nonEmpty =
+          try children.iterator().hasNext()
+          finally children.close()
+        if (nonEmpty)
+          throw new DirectoryNotEmptyException(target.toString)
+      } else createDirectory(target, Array.empty)
     } else if (!isWindows) {
       // Scala Native Issue #4382
       // Devos, ensure preconditions described at top of method endure.
@@ -411,24 +422,62 @@ object Files {
     else if (exists(dir, Array.empty)) dir
     else {
       val parent = dir.getParent()
-      if (parent != null) createDirectories(parent, attrs)
-      createDirectory(dir, attrs)
+      if (parent != null) {
+        try
+          createDirectories(parent, attrs): Unit
+        catch {
+          case _: FileAlreadyExistsException
+              if isDirectory(parent, Array.empty) =>
+            ()
+        }
+      }
+      try
+        createDirectory(dir, attrs): Unit
+      catch {
+        case _: FileAlreadyExistsException if isDirectory(dir, Array.empty) =>
+          ()
+      }
       dir
     }
 
   def createDirectory(dir: Path, attrs: Array[FileAttribute[_]]): Path =
-    if (exists(dir, Array.empty)) {
-      if (!isDirectory(dir, Array.empty)) {
-        throw new FileAlreadyExistsException(dir.toString)
-      } else if (list(dir).iterator().hasNext()) {
-        throw new DirectoryNotEmptyException(dir.toString)
+    if (exists(dir, Array.empty))
+      throw new FileAlreadyExistsException(dir.toString)
+    else
+      tryMkdir(dir) match {
+        case None =>
+          setAttributes(dir, attrs)
+          dir
+        case Some(_) if exists(dir, Array.empty) =>
+          throw new FileAlreadyExistsException(dir.toString)
+        case Some(failure) =>
+          throw failure
       }
-      dir
-    } else if (dir.toFile().mkdir()) {
-      setAttributes(dir, attrs)
-      dir
-    } else {
-      throw new IOException()
+
+  // File.mkdir does not keep errno: Zone cleanup can clear it. Make the
+  // directory here and turn the syscall's own error into an IOException
+  // that names the path. 0777 matches java.io.File.mkdir.
+  private def tryMkdir(dir: Path): Option[IOException] =
+    Zone.acquire { implicit z =>
+      val file = dir.toFile()
+      if (isWindows) {
+        val created = FileApi.CreateDirectoryW(
+          toCWideStringUTF16LE(file.getAbsolutePath()),
+          securityAttributes = null
+        )
+        if (created) None
+        else
+          Some(
+            WindowsException.onPathWithLastEror(
+              dir.toString,
+              GetLastError()
+            )
+          )
+      } else {
+        val mode = Integer.parseInt("777", 8).toUInt
+        if (stat.mkdir(toCString(file.getPath()), mode) == 0) None
+        else Some(UnixException(dir.toString, errno))
+      }
     }
 
   def createFile(path: Path, attrs: Array[FileAttribute[_]]): Path = {
@@ -726,11 +775,44 @@ object Files {
     getAttribute(path, "posix:permissions", options)
       .asInstanceOf[Set[PosixFilePermission]]
 
+  private final val ProbeDirectory = 0
+  private final val ProbeRegular = 1
+  private final val ProbeSymlink = 2
+
+  private def probeFileType(
+      path: Path,
+      options: Array[LinkOption],
+      fileType: Int
+  )(fallback: => Boolean): Boolean = {
+    if (isWindows) fallback
+    else if (path.getFileSystem().provider().getScheme() != "file") fallback
+    else
+      Zone.acquire { implicit z =>
+        import scala.scalanative.posix.sys.statOps.statOps
+        val buf = alloc[stat.stat]()
+        val cpath = toCString(path.toString)
+        val err =
+          if (options.contains(LinkOption.NOFOLLOW_LINKS))
+            stat.lstat(cpath, buf)
+          else stat.stat(cpath, buf)
+        err == 0 && {
+          val mode = buf.st_mode
+          fileType match {
+            case ProbeDirectory => stat.S_ISDIR(mode) == 1
+            case ProbeRegular   => stat.S_ISREG(mode) == 1
+            case _              => stat.S_ISLNK(mode) == 1
+          }
+        }
+      }
+  }
+
   def isDirectory(path: Path, options: Array[LinkOption]): Boolean =
-    try {
-      val attrs = readAttributes(path, classOf[BasicFileAttributes], options)
-      attrs != null && attrs.isDirectory()
-    } catch { case _: IOException => false }
+    probeFileType(path, options, ProbeDirectory) {
+      try {
+        val attrs = readAttributes(path, classOf[BasicFileAttributes], options)
+        attrs != null && attrs.isDirectory()
+      } catch { case _: IOException => false }
+    }
 
   def isExecutable(path: Path): Boolean =
     path.toFile().canExecute()
@@ -741,25 +823,27 @@ object Files {
   def isReadable(path: Path): Boolean =
     path.toFile().canRead()
 
-  def isRegularFile(path: Path, options: Array[LinkOption]): Boolean = {
-    try {
-      val attrs = readAttributes(path, classOf[BasicFileAttributes], options)
-      attrs != null && attrs.isRegularFile()
-    } catch { case _: IOException => false }
-  }
+  def isRegularFile(path: Path, options: Array[LinkOption]): Boolean =
+    probeFileType(path, options, ProbeRegular) {
+      try {
+        val attrs = readAttributes(path, classOf[BasicFileAttributes], options)
+        attrs != null && attrs.isRegularFile()
+      } catch { case _: IOException => false }
+    }
 
   def isSameFile(path: Path, path2: Path): Boolean =
     path.toFile().getCanonicalPath() == path2.toFile().getCanonicalPath()
 
-  def isSymbolicLink(path: Path): Boolean =
-    try {
-      val attrs = readAttributes(
-        path,
-        classOf[BasicFileAttributes],
-        Array(LinkOption.NOFOLLOW_LINKS)
-      )
-      attrs != null && attrs.isSymbolicLink()
-    } catch { case _: IOException => false }
+  def isSymbolicLink(path: Path): Boolean = {
+    val noFollow = Array(LinkOption.NOFOLLOW_LINKS)
+    probeFileType(path, noFollow, ProbeSymlink) {
+      try {
+        val attrs =
+          readAttributes(path, classOf[BasicFileAttributes], noFollow)
+        attrs != null && attrs.isSymbolicLink()
+      } catch { case _: IOException => false }
+    }
+  }
 
   def isWritable(path: Path): Boolean =
     path.toFile().canWrite()
